@@ -29,6 +29,7 @@ import {
   BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
+import { GoogleGenAI } from "@google/genai";
 import { LedgerItem, InvestmentItem, ChecklistState } from "./types";
 import { 
   MOVE_IN_DATE, 
@@ -213,6 +214,16 @@ export default function App() {
 
   // 재무적 지출 분석 탭: 카테고리별 상세 지출 드릴다운 선택 상태
   const [drilldownCategory, setDrilldownCategory] = useState<string>("전체");
+
+  // Gemini 데이터 분석 챗봇: 개인 API Key는 이 브라우저에만 저장되고 외부로 전송되지 않는다.
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => localStorage.getItem("VIVALDI_GEMINI_KEY") || "");
+  const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
+  const [chatInput, setChatInput] = useState<string>("");
+  const [chatLoading, setChatLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    localStorage.setItem("VIVALDI_GEMINI_KEY", geminiApiKey);
+  }, [geminiApiKey]);
 
   // 직접 메모 기능 (VIVALDI_CATEGORY_MEMOS)
   const [categoryMemos, setCategoryMemos] = useState<Record<string, Record<string, string>>>(() => {
@@ -564,80 +575,6 @@ export default function App() {
     };
   };
 
-  // --- 4. LOAN SIMULATOR STATE (원리금균등상환 기준) ---
-  const mortgageTermMonthsDefault = (() => {
-    const start = new Date(LIABILITY_MORTGAGE.startDate);
-    const end = new Date(LIABILITY_MORTGAGE.endDate);
-    const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
-    return months > 0 ? months : 360;
-  })();
-
-  const [simLoan, setSimLoan] = useState<number>(LIABILITY_MORTGAGE.amount);
-  const [simRate, setSimRate] = useState<number>(LIABILITY_MORTGAGE.rate);
-  const [simTermYears, setSimTermYears] = useState<number>(Math.round(mortgageTermMonthsDefault / 12));
-  const [simExtraPayment, setSimExtraPayment] = useState<number>(1000000);
-
-  // 원리금균등상환(equal principal & interest) 월 납입액 계산: M = P * r / (1 - (1+r)^-n)
-  const calculateEqualPayment = (principal: number, annualRatePct: number, termMonths: number) => {
-    const monthlyRate = (annualRatePct / 100) / 12;
-    if (monthlyRate === 0) return principal / termMonths;
-    return (principal * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -termMonths));
-  };
-
-  const simTermMonths = Math.round(simTermYears * 12);
-  const standardMonthlyPayment = calculateEqualPayment(simLoan, simRate, simTermMonths);
-
-  // Simulation calculations (원리금균등상환 기준: 매월 납입액이 고정, 조기상환분은 원금에서 추가 차감)
-  const calculateAmortization = () => {
-    const monthlyRate = (simRate / 100) / 12;
-
-    // 기준 트랙: 원리금균등상환 월 납입액만 납부 (약정 만기까지)
-    let balanceStandard = simLoan;
-    let monthsStandard = 0;
-    let interestStandard = 0;
-
-    while (balanceStandard > 0 && monthsStandard < simTermMonths + 1) {
-      const interestThisMonth = balanceStandard * monthlyRate;
-      let principalPaid = standardMonthlyPayment - interestThisMonth;
-      if (balanceStandard < principalPaid) {
-        principalPaid = balanceStandard;
-      }
-      balanceStandard -= principalPaid;
-      interestStandard += interestThisMonth;
-      monthsStandard++;
-    }
-
-    // 조기상환 트랙: 원리금균등 월 납입액 + 매월 추가 원금 중도상환액
-    let balanceWithExtra = simLoan;
-    let monthsWithExtra = 0;
-    let interestWithExtra = 0;
-
-    while (balanceWithExtra > 0 && monthsWithExtra < simTermMonths + 1) {
-      const interestThisMonth = balanceWithExtra * monthlyRate;
-      let principalPaid = (standardMonthlyPayment - interestThisMonth) + simExtraPayment;
-      if (balanceWithExtra < principalPaid) {
-        principalPaid = balanceWithExtra;
-      }
-      balanceWithExtra -= principalPaid;
-      interestWithExtra += interestThisMonth;
-      monthsWithExtra++;
-    }
-
-    const monthsSaved = Math.max(0, monthsStandard - monthsWithExtra);
-    const interestSaved = Math.max(0, interestStandard - interestWithExtra);
-
-    return {
-      monthsWithExtra,
-      interestWithExtra,
-      monthsStandard,
-      interestStandard,
-      monthsSaved,
-      interestSaved
-    };
-  };
-
-  const simResult = calculateAmortization();
-
   // --- 5. ENHANCED AI WEALTH ADVISOR REPORT ENGINE ---
   const renderAiReport = () => {
     // 1) 식비 및 양육/기타 변동비 항목의 적정성 평가
@@ -791,6 +728,65 @@ export default function App() {
     setFormContent("");
     // Switch filter to the month of the added item so they see it
     setSelectedMonth(formMonth);
+  };
+
+  // Gemini 데이터 분석 챗봇: 업로드된 수입/지출·자산 데이터를 컨텍스트로 전달해 질문에 답한다.
+  const handleSendChatMessage = async () => {
+    const question = chatInput.trim();
+    if (!question || chatLoading) return;
+
+    setChatMessages(prev => [...prev, { role: "user", text: question }]);
+    setChatInput("");
+
+    const trimmedKey = geminiApiKey.trim();
+    if (!trimmedKey) {
+      setChatMessages(prev => [...prev, { role: "assistant", text: "🔑 개인 Gemini API Key를 입력해 주세요." }]);
+      return;
+    }
+
+    setChatLoading(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: trimmedKey });
+
+      const ledgerContext = ledger.map(item => ({
+        월: item.month,
+        구분: item.type,
+        카테고리: item.category,
+        내용: item.content,
+        금액: item.amount,
+        활성화: item.active
+      }));
+      const assetContext = {
+        자유입출금및예적금: freeAssets,
+        투자자산: investmentAssets,
+        부채: { 명칭: LIABILITY_MORTGAGE.name, 금액: LIABILITY_MORTGAGE.amount, 금리: LIABILITY_MORTGAGE.rate },
+        가계총자산: totalAssets
+      };
+
+      const prompt = `당신은 '${LOCATION}'에 거주하는 ${HUSBAND.name}·${WIFE.name} 부부의 가계부 데이터 분석 비서입니다.
+아래는 이 가계의 실제 수입/지출 내역(JSON)과 자산 요약(JSON)입니다. 오직 이 데이터를 근거로 사용자의 질문에 한국어로 간결하고 정확하게 답변하세요. 금액은 천 단위 콤마와 "원" 단위로 표기하세요.
+
+[수입/지출 내역]
+${JSON.stringify(ledgerContext)}
+
+[자산 요약]
+${JSON.stringify(assetContext)}
+
+[질문]
+${question}`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: prompt
+      });
+
+      setChatMessages(prev => [...prev, { role: "assistant", text: response.text || "응답을 생성하지 못했습니다." }]);
+    } catch (error) {
+      console.error(error);
+      setChatMessages(prev => [...prev, { role: "assistant", text: "⚠️ Gemini API 호출 중 오류가 발생했습니다. API Key가 올바른지 확인해 주세요." }]);
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   // --- 2b. EXCEL DATA PARSING ENGINES (SMART UNIFIED SPLIT SHIELD) ---
@@ -993,16 +989,30 @@ export default function App() {
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
 
+        // 시트별로 파싱한 결과를 여기에 누적한다(이전엔 시트마다 덮어써서 여러 명의 시트가 있으면
+        // 마지막 시트만 남는 버그가 있었음 - 부부 각자 시트를 합산하려면 누적이 필수).
+        const combinedFree: typeof ASSET_FREE_DEPOSITS = [];
+        const combinedInvestMap = new Map<string, InvestmentItem>();
+        let combinedCreditScore: number | null = null;
+        let combinedMortgageAmount: number | null = null;
+        let combinedMortgageRate: number | null = null;
+
         let assetsSuccessCount = 0;
         let anySheetParsed = false;
+
+        const genericAssetSheetKeywords = ["현황", "자산", "재무", "뱅샐", "고객", "asset"];
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
           const rows = utils.sheet_to_json<any[]>(ws, { header: 1 });
           if (!rows || rows.length === 0) continue;
 
-          const isAssetsSheetName = wsname.includes("현황") || wsname.includes("자산") || wsname.includes("재무") || wsname.includes("뱅샐") || wsname.includes("고객") || wsname.includes("asset");
+          const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
           const textContent = rows.map(r => r.join(" ")).join("\n").toLowerCase();
+
+          // 시트 이름이 "현황/자산/재무/뱅샐/고객/asset" 같은 일반 구조 키워드가 아니라면
+          // (예: "영범", "재은") 실제 명의로 간주하여 계좌명 앞에 명의 태그를 붙인다.
+          const ownerTag = isAssetsSheetName ? "" : `[${wsname}] `;
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
             let parsedStructured = false;
@@ -1073,7 +1083,7 @@ export default function App() {
                     const amountCell = assetAmountCol !== undefined ? row[assetAmountCol] : undefined;
 
                     if (typeof nameCell === "string" && nameCell.trim().length > 0 && typeof amountCell === "number") {
-                      const name = nameCell.trim();
+                      const name = ownerTag + nameCell.trim();
                       const amount = Math.abs(amountCell);
 
                       if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
@@ -1128,7 +1138,7 @@ export default function App() {
                   const principalVal = principalColIdx !== -1 ? dRow[principalColIdx] : undefined;
                   const appraisedVal = appraisedColIdx !== -1 ? dRow[appraisedColIdx] : undefined;
                   if (typeof nameVal === "string" && nameVal.trim().length > 0 && typeof principalVal === "number" && typeof appraisedVal === "number") {
-                    const name = nameVal.trim();
+                    const name = ownerTag + nameVal.trim();
                     const rawYield = yieldColIdx !== -1 ? dRow[yieldColIdx] : undefined;
                     const yieldRate = typeof rawYield === "number"
                       ? Math.round(rawYield * 100) / 100
@@ -1185,13 +1195,13 @@ export default function App() {
               if (assetHeaderRowIdx !== -1) {
                 newInvestments.push(...Array.from(investMap.values()));
 
-                setFreeAssets(newFree);
-                setSavingsAssets([]);
-                setElectronicAssets([]);
-                setInvestmentAssets(newInvestments);
-                if (creditScore) HUSBAND.creditScore = creditScore;
-                if (mortgageAmount) LIABILITY_MORTGAGE.amount = mortgageAmount;
-                if (mortgageRate) LIABILITY_MORTGAGE.rate = mortgageRate;
+                newFree.forEach(f => {
+                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
+                });
+                newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
+                if (creditScore) combinedCreditScore = creditScore;
+                if (mortgageAmount) combinedMortgageAmount = mortgageAmount;
+                if (mortgageRate) combinedMortgageRate = mortgageRate;
 
                 assetsSuccessCount += (newFree.length + newInvestments.length);
                 parsedStructured = true;
@@ -1252,7 +1262,7 @@ export default function App() {
                   return;
                 }
 
-                let ownerPrefix = "";
+                let ownerPrefix = ownerTag;
                 if (rawOwner) {
                   const ownerStr = String(rawOwner);
                   if (ownerStr.includes("영범")) {
@@ -1262,7 +1272,7 @@ export default function App() {
                   }
                 }
 
-                if (ownerPrefix && !name.startsWith("[영범]") && !name.startsWith("[재은]")) {
+                if (ownerPrefix && !name.startsWith("[")) {
                   name = ownerPrefix + name;
                 }
 
@@ -1290,10 +1300,10 @@ export default function App() {
               });
 
               if (newFree.length > 0 || newInvestments.length > 0) {
-                setFreeAssets(newFree);
-                setSavingsAssets([]);
-                setElectronicAssets([]);
-                setInvestmentAssets(newInvestments);
+                newFree.forEach(f => {
+                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
+                });
+                newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
                 assetsSuccessCount += (newFree.length + newInvestments.length);
                 anySheetParsed = true;
               }
@@ -1302,6 +1312,13 @@ export default function App() {
         }
 
         if (anySheetParsed) {
+          setFreeAssets(combinedFree);
+          setSavingsAssets([]);
+          setElectronicAssets([]);
+          setInvestmentAssets(Array.from(combinedInvestMap.values()));
+          if (combinedCreditScore) HUSBAND.creditScore = combinedCreditScore;
+          if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
+          if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
           setAssetsFileName(file.name);
           alert(`🏦 자산/부채 현황 ${assetsSuccessCount}개 계좌가 성공적으로 연동되었습니다!`);
         } else {
@@ -2241,14 +2258,14 @@ with tab_analysis:
                 {/* Card 1: Total Assets */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_assets">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">💵 총 금융자산</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">💵 가계 총 자산</span>
                     <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">예적금+투자</span>
                   </div>
                   <div className="mt-4">
                     <span className="text-2xl font-black font-mono text-slate-950 tracking-tight">
                       {totalAssets.toLocaleString()}원
                     </span>
-                    <p className="text-[11px] text-slate-400 mt-1">예적금, 주식, 전자금융 총액</p>
+                    <p className="text-[11px] text-slate-400 mt-1">영범 자산 + 재은 자산 합산 (예적금, 주식, 전자금융 총액)</p>
                   </div>
                 </div>
 
@@ -2434,6 +2451,72 @@ with tab_analysis:
 
                 </div>
 
+              </div>
+
+              {/* Gemini AI 데이터 분석 챗봇 */}
+              <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4" id="gemini_chatbot_panel">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">🤖</span>
+                    <span>Gemini 데이터 분석 챗봇</span>
+                  </h3>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                    업로드된 수입/지출 내역과 자산 데이터를 바탕으로 질문에 답합니다. (예: "6월보다 7월에 지출을 얼마 더 했어?")
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-600 block">🔑 개인 Gemini API Key</label>
+                  <input
+                    type="password"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-xs sm:text-sm w-full font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    id="gemini_api_key_input"
+                  />
+                  <p className="text-[10px] text-slate-400">키는 이 브라우저에만 저장되며 외부 서버로 전송되지 않습니다. (Google AI Studio에서 발급)</p>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-3 max-h-80 overflow-y-auto" id="gemini_chat_messages">
+                  {chatMessages.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-6">아직 대화가 없습니다. 아래에 질문을 입력해 보세요.</p>
+                  ) : (
+                    chatMessages.map((msg, i) => (
+                      <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                        <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-xs sm:text-sm whitespace-pre-wrap ${msg.role === "user" ? "bg-indigo-600 text-white" : "bg-white border border-slate-200 text-slate-800"}`}>
+                          {msg.text}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  {chatLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-white border border-slate-200 text-slate-400 rounded-2xl px-4 py-2.5 text-xs">답변 생성 중...</div>
+                    </div>
+                  )}
+                </div>
+
+                <form
+                  onSubmit={(e) => { e.preventDefault(); handleSendChatMessage(); }}
+                  className="flex gap-2"
+                  id="gemini_chat_form"
+                >
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="예: 6월보다 7월에 지출을 얼마 더 했어?"
+                    className="flex-1 bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={chatLoading}
+                    className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-300 text-white font-bold text-xs sm:text-sm px-5 py-2 rounded-xl transition-all shrink-0"
+                  >
+                    전송
+                  </button>
+                </form>
               </div>
             </div>
           )}
@@ -3104,6 +3187,77 @@ with tab_analysis:
                               </div>
                             </div>
 
+                            {selectedCat !== "전체" && (() => {
+                              const monthToIdx = (m: string) => {
+                                const [y, mo] = m.split("-").map(Number);
+                                return y * 12 + (mo - 1);
+                              };
+                              const idxToMonth = (idx: number) => {
+                                const y = Math.floor(idx / 12);
+                                const mo = (idx % 12) + 1;
+                                return `${y}-${String(mo).padStart(2, "0")}`;
+                              };
+                              const baseIdx = monthToIdx(selectedMonth);
+                              const last6Months = Array.from({ length: 6 }, (_, i) => idxToMonth(baseIdx - (5 - i)));
+
+                              const monthlyTotals = last6Months.map(m => ({
+                                month: m,
+                                total: ledger.filter(item => item.month === m && item.category === selectedCat && item.type === "지출" && item.active).reduce((sum, item) => sum + item.amount, 0)
+                              }));
+
+                              const maxTotal = Math.max(...monthlyTotals.map(x => x.total), 1);
+
+                              return (
+                                <div className="space-y-3" id="drilldown_category_trend">
+                                  <h5 className="text-xs font-bold text-slate-600">📈 "{selectedCat}" 카테고리 최근 6개월 지출 추이</h5>
+                                  <div className="overflow-x-auto">
+                                    <table className="w-full text-xs sm:text-sm">
+                                      <thead>
+                                        <tr className="border-b border-slate-200 text-slate-500 text-left">
+                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">월</th>
+                                          <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">지출액</th>
+                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">전월 대비</th>
+                                          <th className="py-2 pr-3 font-bold w-1/2">규모</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {monthlyTotals.map((mt, i) => {
+                                          const prev = i > 0 ? monthlyTotals[i - 1].total : null;
+                                          const delta = prev !== null ? mt.total - prev : null;
+                                          const pct = maxTotal > 0 ? (mt.total / maxTotal) * 100 : 0;
+                                          const isCurrent = mt.month === selectedMonth;
+                                          return (
+                                            <tr key={mt.month} className={`border-b border-slate-100 ${isCurrent ? "bg-emerald-50/40" : ""}`}>
+                                              <td className={`py-2 pr-3 font-bold whitespace-nowrap ${isCurrent ? "text-emerald-700" : "text-slate-700"}`}>
+                                                {mt.month}{isCurrent ? " (선택)" : ""}
+                                              </td>
+                                              <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{mt.total.toLocaleString()}원</td>
+                                              <td className="py-2 pr-3 whitespace-nowrap">
+                                                {delta === null ? (
+                                                  <span className="text-slate-400">-</span>
+                                                ) : delta === 0 ? (
+                                                  <span className="text-slate-400">변동없음</span>
+                                                ) : (
+                                                  <span className={`font-bold ${delta > 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                                                    {delta > 0 ? "▲" : "▼"} {Math.abs(delta).toLocaleString()}원
+                                                  </span>
+                                                )}
+                                              </td>
+                                              <td className="py-2 pr-3">
+                                                <div className="w-full bg-slate-100 rounded-full h-3">
+                                                  <div className={`h-3 rounded-full ${isCurrent ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: `${pct}%` }}></div>
+                                                </div>
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
                             <div className="overflow-x-auto">
                               <table className="w-full text-xs sm:text-sm" id="drilldown_detail_table">
                                 <thead>
@@ -3612,269 +3766,6 @@ with tab_analysis:
 
               </div>
 
-              {/* 3) 월별 소비 및 수입 패턴 분석 (Trend Custom SVG Graph) */}
-              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4" id="ledger_trend_section">
-                <div>
-                  <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                    <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                    <span>📈 월별 가계 수입 대 지출 트렌드 분석</span>
-                  </h4>
-                  <p className="text-xs text-slate-400">
-                    등록 및 활성화된 원장 데이터에 기반하여 계산된 월별 실질 수입과 실질 지출 추이 차트입니다. (체크 해제된 내역은 차트에서도 자동 배제됩니다!)
-                  </p>
-                </div>
-
-                {/* Custom Responsive SVG Grouped Bar + Line Graph */}
-                <div className="py-4 space-y-4" id="trend_graph_card">
-                  
-                  {/* Graph Stage */}
-                  <div className="relative bg-slate-50 rounded-2xl border border-slate-100 p-4" id="chart_stage_box">
-                    
-                    {/* SVG Viewport */}
-                    <div className="w-full h-64 relative">
-                      <svg className="w-full h-full" viewBox="0 0 600 240" preserveAspectRatio="none">
-                        
-                        {/* Grid Lines */}
-                        <line x1="50" y1="30" x2="570" y2="30" stroke="#E2E8F0" strokeDasharray="3,3" />
-                        <line x1="50" y1="80" x2="570" y2="80" stroke="#E2E8F0" strokeDasharray="3,3" />
-                        <line x1="50" y1="130" x2="570" y2="130" stroke="#E2E8F0" strokeDasharray="3,3" />
-                        <line x1="50" y1="180" x2="570" y2="180" stroke="#E2E8F0" strokeDasharray="3,3" />
-                        <line x1="50" y1="210" x2="570" y2="210" stroke="#CBD5E1" strokeWidth="1" />
-                        
-                        {/* Y-Axis scale label approximations */}
-                        <text x="15" y="34" className="text-[9px] fill-slate-400 font-mono font-bold">900만</text>
-                        <text x="15" y="84" className="text-[9px] fill-slate-400 font-mono font-bold">600만</text>
-                        <text x="15" y="134" className="text-[9px] fill-slate-400 font-mono font-bold">300만</text>
-                        <text x="15" y="184" className="text-[9px] fill-slate-400 font-mono font-bold">100만</text>
-                        <text x="15" y="214" className="text-[9px] fill-slate-400 font-mono font-bold">0원</text>
-
-                        {/* --- 6월 데이터 Bars --- */}
-                        {/* Income bar (8,345,000원 -> height approx 139px) */}
-                        <rect x="110" y="41" width="24" height="169" rx="4" fill="#10B981" />
-                        {/* Expense bar (1,286,000원 -> height approx 21px) */}
-                        <rect x="138" y="189" width="24" height="21" rx="4" fill="#EF4444" />
-                        {/* Label x */}
-                        <text x="122" y="228" className="text-[10px] fill-slate-500 font-bold" textAnchor="middle">2026-06</text>
-
-                        {/* --- 7월 데이터 Bars (Dynamic values from state) --- */}
-                        {/* Income bar (Dynamic height, scaling factor approx 20px per 1M원) */}
-                        <rect 
-                          x="270" 
-                          y={Math.max(30, 210 - (activeIncomeTotal / 1000000 * 20))} 
-                          width="24" 
-                          height={Math.min(180, (activeIncomeTotal / 1000000 * 20))} 
-                          rx="4" 
-                          fill="#10B981" 
-                        />
-                        {/* Expense bar */}
-                        <rect 
-                          x="298" 
-                          y={Math.max(30, 210 - (activeExpenseTotal / 1000000 * 20))} 
-                          width="24" 
-                          height={Math.min(180, (activeExpenseTotal / 1000000 * 20))} 
-                          rx="4" 
-                          fill="#EF4444" 
-                        />
-                        <text x="296" y="228" className="text-[10px] fill-slate-800 font-bold" textAnchor="middle">2026-07 (선택)</text>
-
-                        {/* --- 8월 데이터 Bars --- */}
-                        {/* Income bar (8,300,000원 -> height approx 138px) */}
-                        <rect x="430" y="42" width="24" height="168" rx="4" fill="#10B981" />
-                        {/* Expense bar (3,840,000원 -> height approx 64px) */}
-                        <rect x="458" y="146" width="24" height="64" rx="4" fill="#EF4444" />
-                        <text x="442" y="228" className="text-[10px] fill-slate-500 font-bold" textAnchor="middle">2026-08</text>
-
-                        {/* Net Worth Line Overlay */}
-                        {/* Dots: 6월 (7,059,000원 -> Y approx 68px), 7월 (Net value -> Y dynamic), 8월 (4,460,000원 -> Y approx 120px) */}
-                        <path 
-                          d={`M 124 68 L 296 ${210 - (netMonthlyIncome / 1000000 * 20)} L 444 120`} 
-                          fill="none" 
-                          stroke="#6366F1" 
-                          strokeWidth="3.5" 
-                          strokeLinecap="round" 
-                          strokeLinejoin="round" 
-                        />
-                        
-                        {/* Line dots */}
-                        <circle cx="124" cy="68" r="5.5" fill="#6366F1" stroke="white" strokeWidth="2" />
-                        <circle cx="296" cy={210 - (netMonthlyIncome / 1000000 * 20)} r="5.5" fill="#6366F1" stroke="white" strokeWidth="2" />
-                        <circle cx="444" cy="120" r="5.5" fill="#6366F1" stroke="white" strokeWidth="2" />
-
-                      </svg>
-                    </div>
-
-                  </div>
-
-                  {/* Graph Legend & explanations */}
-                  <div className="flex flex-wrap items-center justify-between gap-4 text-xs bg-slate-50 p-3 rounded-xl border border-slate-200" id="graph_legend">
-                    <div className="flex items-center space-x-6">
-                      <div className="flex items-center space-x-1.5">
-                        <span className="w-3 h-3 bg-[#10B981] rounded-xs inline-block"></span>
-                        <span className="text-slate-600 font-bold">실질 수입 총계</span>
-                      </div>
-                      <div className="flex items-center space-x-1.5">
-                        <span className="w-3 h-3 bg-[#EF4444] rounded-xs inline-block"></span>
-                        <span className="text-slate-600 font-bold">실질 지출 총계</span>
-                      </div>
-                      <div className="flex items-center space-x-1.5">
-                        <span className="w-4 h-1 bg-[#6366F1] rounded-full inline-block"></span>
-                        <span className="text-slate-600 font-bold text-indigo-600">잉여 가용 자금 (순수입 곡선)</span>
-                      </div>
-                    </div>
-                    <span className="text-[10px] text-slate-400 font-mono font-bold">가계부의 체크박스를 켜거나 끄면 7월 높낮이가 즉시 변경됩니다.</span>
-                  </div>
-
-                </div>
-              </div>
-
-              {/* 4) NH MORTGAGE LOAN REPAYMENT SIMULATOR */}
-              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-6" id="mortgage_simulator_section">
-                
-                <div className="border-b border-slate-100 pb-4">
-                  <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                    <PiggyBank className="w-5.5 h-5.5 text-emerald-600 animate-pulse" />
-                    <span>🧮 NH 주택담보대출 조기 상환 및 이자 비용 시뮬레이터</span>
-                  </h4>
-                  <p className="text-xs text-slate-400">
-                    매달 약정된 은행 납입금(이자 등) 외에, 추가로 여유 자금을 모아 원금을 적극 중도상환할 경우의 만기 단축 효과를 확인해 보세요.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8" id="simulator_inputs_and_results">
-                  
-                  {/* Left Column: Form Controls */}
-                  <div className="space-y-4 lg:col-span-1 bg-slate-50 p-5 rounded-2xl border border-slate-200" id="simulator_form_controls">
-                    <h5 className="font-bold text-xs uppercase tracking-wider text-slate-500 mb-2">⚙️ 시뮬레이션 매개변수</h5>
-                    
-                    {/* Loan Amount Input */}
-                    <div className="space-y-1">
-                      <label className="text-xs text-slate-700 font-bold block">대출 총액 (원)</label>
-                      <input 
-                        type="number"
-                        step="10000000"
-                        value={simLoan}
-                        onChange={(e) => setSimLoan(Number(e.target.value))}
-                        className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs sm:text-sm font-bold w-full text-slate-900 font-mono focus:outline-none focus:ring-1 focus:ring-slate-400"
-                      />
-                    </div>
-
-                    {/* Interest Rate */}
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-xs text-slate-700 font-bold">
-                        <span>대출 약정 금리 (%):</span>
-                        <strong className="text-emerald-600">{simRate}%</strong>
-                      </div>
-                      <input 
-                        type="range"
-                        min="1.0"
-                        max="10.0"
-                        step="0.05"
-                        value={simRate}
-                        onChange={(e) => setSimRate(Number(e.target.value))}
-                        className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                      />
-                    </div>
-
-                    {/* Loan Term */}
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-xs text-slate-700 font-bold">
-                        <span>대출 만기 (년):</span>
-                        <strong className="text-emerald-600">{simTermYears}년</strong>
-                      </div>
-                      <input
-                        type="range"
-                        min="5"
-                        max="40"
-                        step="1"
-                        value={simTermYears}
-                        onChange={(e) => setSimTermYears(Number(e.target.value))}
-                        className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                      />
-                    </div>
-
-                    {/* Auto-calculated equal payment amount (원리금균등상환) */}
-                    <div className="space-y-1 bg-white border border-emerald-200 rounded-lg p-3">
-                      <span className="text-[10px] text-slate-500 font-bold block">🧮 원리금균등상환 자동계산 월 납입액</span>
-                      <strong className="text-sm sm:text-base font-mono text-emerald-700 block">
-                        {Math.round(standardMonthlyPayment).toLocaleString()}원 / 월
-                      </strong>
-                      <p className="text-[10px] text-slate-400">대출총액·금리·만기를 기준으로 매월 동일한 원리금(원금+이자)을 납부하는 원리금균등상환 방식으로 자동 계산됩니다.</p>
-                    </div>
-
-                    {/* Extra prepayment amount */}
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-xs text-slate-700 font-bold">
-                        <span>매월 추가 원금 중도상환액 (원):</span>
-                        <strong className="text-emerald-600 font-mono">{(simExtraPayment).toLocaleString()}원</strong>
-                      </div>
-                      <input 
-                        type="range"
-                        min="0"
-                        max="5000000"
-                        step="100000"
-                        value={simExtraPayment}
-                        onChange={(e) => setSimExtraPayment(Number(e.target.value))}
-                        className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                      />
-                      <p className="text-[10px] text-slate-400">가용한 저축 여유액의 대출 중도상환 가정</p>
-                    </div>
-
-                  </div>
-
-                  {/* Right Column: Simulation Outcomes */}
-                  <div className="lg:col-span-2 space-y-6 flex flex-col justify-between" id="simulator_results_column">
-                    
-                    {/* Metric Cards Row */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4" id="sim_result_metrics">
-                      
-                      <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-4 flex flex-col justify-between shadow-xs">
-                        <span className="text-xs text-emerald-700 block font-bold">⏳ 조기 완납 기간</span>
-                        <div className="mt-2">
-                          <strong className="text-base sm:text-lg font-mono text-slate-900 block font-black">
-                            {Math.floor(simResult.monthsWithExtra / 12)}년 {simResult.monthsWithExtra % 12}개월
-                          </strong>
-                          <span className="text-xs text-emerald-800 font-bold block mt-1">
-                            기본 트랙 대비 {simResult.monthsSaved}개월 단축 효과
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-4 flex flex-col justify-between shadow-xs">
-                        <span className="text-xs text-emerald-700 block font-bold">💰 총 절감 이자 비용</span>
-                        <div className="mt-2">
-                          <strong className="text-base sm:text-lg font-mono text-emerald-800 block font-black">
-                            {Math.round(simResult.interestSaved).toLocaleString()}원
-                          </strong>
-                          <span className="text-xs text-slate-600 block mt-1 font-bold">
-                            중도상환 반영 이자: {Math.round(simResult.interestWithExtra).toLocaleString()}원
-                          </span>
-                        </div>
-                      </div>
-
-                    </div>
-
-                    {/* Simulation Advice Box */}
-                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 text-xs sm:text-sm text-slate-700 leading-relaxed space-y-2.5" id="simulator_financial_advice">
-                      <p className="font-bold text-slate-900 flex items-center space-x-1.5">
-                        <Check className="w-4.5 h-4.5 text-emerald-600" />
-                        <span>감이동 비발디 재정 전략 조언</span>
-                      </p>
-                      <p>
-                        매월 약정금 외에 여유 자금인 <span className="font-bold text-emerald-600 font-mono">{(simExtraPayment).toLocaleString()}원</span>을 
-                        원금 조기상환에 적극 투입할 경우, 기본 상환 트랙 대비 대출 보유 기간을 총 <span className="font-bold text-slate-950">{simResult.monthsSaved}개월</span> 단축하며, 
-                        이자 비용 역시 대폭 줄여 총 <span className="font-bold text-emerald-600 font-mono">{Math.round(simResult.interestSaved).toLocaleString()}원</span>의 
-                        금융 비용을 세이브하는 효과를 낳습니다.
-                      </p>
-                      <p className="text-[10px] text-slate-400">
-                        *본 시뮬레이션은 월복리 및 약정상세 조건(상환거치, 일할 계산, 중도상환수수료 조건 등)에 따라 실 계산액과 소폭 오차가 생길 수 있습니다.
-                      </p>
-                    </div>
-
-                  </div>
-
-                </div>
-
-              </div>
 
             </div>
           )}
