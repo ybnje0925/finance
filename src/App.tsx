@@ -318,39 +318,60 @@ export default function App() {
     if (!supabase || !session) return;
     let cancelled = false;
 
+    // Supabase(PostgREST)는 한 번에 최대 1000행만 돌려준다 - 원장처럼 1000건이 넘는 테이블은
+    // range()로 계속 이어받아야 뒤쪽 데이터가 잘리지 않는다.
+    const fetchAllRows = async (tableName: string, orderCol?: string): Promise<any[]> => {
+      if (!supabase) return [];
+      const pageSize = 1000;
+      let allRows: any[] = [];
+      let from = 0;
+      while (true) {
+        let query = supabase.from(tableName).select("*").range(from, from + pageSize - 1);
+        if (orderCol) query = query.order(orderCol, { ascending: true });
+        const { data, error } = await query;
+        if (error) {
+          console.error(`[Supabase] ${tableName} 불러오기 실패:`, error.message);
+          break;
+        }
+        if (!data || data.length === 0) break;
+        allRows = allRows.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      return allRows;
+    };
+
     const fetchAll = async () => {
       if (!supabase) return;
-      const [ledgerRes, freeRes, investRes, checklistRes, paymentsRes, settingsRes] = await Promise.all([
-        supabase.from("ledger_items").select("*"),
-        supabase.from("asset_free_items").select("*"),
-        supabase.from("asset_investment_items").select("*"),
-        supabase.from("checklist_items").select("*").order("sort_order", { ascending: true }),
-        supabase.from("mortgage_payments").select("*").order("payment_date", { ascending: true }),
+      const [ledgerRows, freeRows, investRows, checklistRows, paymentsRows, settingsRes] = await Promise.all([
+        fetchAllRows("ledger_items"),
+        fetchAllRows("asset_free_items"),
+        fetchAllRows("asset_investment_items"),
+        fetchAllRows("checklist_items", "sort_order"),
+        fetchAllRows("mortgage_payments", "payment_date"),
         supabase.from("household_settings").select("*").eq("id", 1).maybeSingle()
       ]);
       if (cancelled) return;
 
-      if (ledgerRes.data && ledgerRes.data.length > 0) {
-        setLedger(ledgerRes.data.map((r: any) => ({
+      if (ledgerRows.length > 0) {
+        setLedger(ledgerRows.map((r: any) => ({
           id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
           amount: Number(r.amount), active: r.active, date: r.date,
           memo: r.memo || "", paymentMethod: r.payment_method || ""
         })));
       }
-      if (freeRes.data && freeRes.data.length > 0) {
-        setFreeAssets(freeRes.data.map((r: any) => ({ name: r.name, amount: Number(r.amount) })));
+      if (freeRows.length > 0) {
+        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Number(r.amount) })));
       }
-      if (investRes.data && investRes.data.length > 0) {
-        setInvestmentAssets(investRes.data.map((r: any) => ({
+      if (investRows.length > 0) {
+        setInvestmentAssets(investRows.map((r: any) => ({
           name: r.name, principal: Number(r.principal), appraised: Number(r.appraised), yieldRate: Number(r.yield_rate)
         })));
       }
-      if (checklistRes.data && checklistRes.data.length > 0) {
-        setChecklist(checklistRes.data.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
+      if (checklistRows.length > 0) {
+        setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
       }
-      if (paymentsRes.data) {
-        setMortgagePayments(paymentsRes.data.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
-      }
+      setMortgagePayments(paymentsRows.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
       if (settingsRes.data) {
         LIABILITY_MORTGAGE.name = settingsRes.data.mortgage_name;
         LIABILITY_MORTGAGE.amount = Number(settingsRes.data.mortgage_amount);
