@@ -218,10 +218,24 @@ export default function App() {
   // --- 0. SUPABASE AUTH (부부 공유 로그인) ---
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
+  const [authView, setAuthView] = useState<"login" | "forgot" | "reset">("login");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginSubmitting, setLoginSubmitting] = useState(false);
+
+  // 비밀번호를 잊었을 때: 이메일로 재설정 링크 발송
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotSubmitting, setForgotSubmitting] = useState(false);
+  const [forgotMessage, setForgotMessage] = useState("");
+  const [forgotError, setForgotError] = useState("");
+
+  // 이메일의 재설정 링크를 타고 돌아왔을 때: 새 비밀번호 설정
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
 
   useEffect(() => {
     if (!supabase) {
@@ -232,8 +246,12 @@ export default function App() {
       setSession(data.session);
       setAuthLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
       setSession(newSession);
+      // 이메일의 재설정 링크를 클릭해서 돌아오면 Supabase가 이 이벤트를 발생시킨다.
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthView("reset");
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -251,6 +269,48 @@ export default function App() {
   const handleLogout = async () => {
     if (!supabase) return;
     await supabase.auth.signOut();
+  };
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase) return;
+    setForgotSubmitting(true);
+    setForgotError("");
+    setForgotMessage("");
+    const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim(), {
+      redirectTo: window.location.origin
+    });
+    if (error) {
+      setForgotError(error.message);
+    } else {
+      setForgotMessage("📧 입력하신 이메일로 비밀번호 재설정 링크를 보냈습니다. 메일함(스팸함 포함)을 확인해 주세요.");
+    }
+    setForgotSubmitting(false);
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase) return;
+    setResetError("");
+    if (newPassword.length < 6) {
+      setResetError("비밀번호는 6자 이상이어야 합니다.");
+      return;
+    }
+    if (newPassword !== newPasswordConfirm) {
+      setResetError("두 비밀번호가 서로 다릅니다.");
+      return;
+    }
+    setResetSubmitting(true);
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) {
+      setResetError(error.message);
+      setResetSubmitting(false);
+      return;
+    }
+    setResetMessage("✅ 비밀번호가 변경되었습니다. 이제 이 비밀번호로 로그인하세요.");
+    setResetSubmitting(false);
+    setNewPassword("");
+    setNewPasswordConfirm("");
   };
 
   // --- 0b. SUPABASE DATA SYNC (영구 저장 + 부부간 실시간 공유) ---
@@ -1676,6 +1736,63 @@ ${question}`;
     );
   }
 
+  // 이메일의 재설정 링크를 클릭해서 돌아온 경우: 세션이 있어도(임시 복구 세션) 새 비밀번호 설정 화면을 먼저 보여준다.
+  if (isSupabaseConfigured && authView === "reset") {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="reset_password_screen">
+        <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
+          <div className="text-center space-y-1">
+            <div className="text-3xl">🔑</div>
+            <h1 className="text-lg font-bold text-slate-900">새 비밀번호 설정</h1>
+            <p className="text-xs text-slate-400">새로 사용할 비밀번호를 입력해 주세요</p>
+          </div>
+          <form onSubmit={handleResetPassword} className="space-y-3" id="reset_password_form">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-600 block">새 비밀번호</label>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+                minLength={6}
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-600 block">새 비밀번호 확인</label>
+              <input
+                type="password"
+                value={newPasswordConfirm}
+                onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                required
+                minLength={6}
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            {resetError && <p className="text-xs text-rose-600 font-semibold">{resetError}</p>}
+            {resetMessage && <p className="text-xs text-emerald-600 font-semibold">{resetMessage}</p>}
+            <button
+              type="submit"
+              disabled={resetSubmitting}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
+            >
+              {resetSubmitting ? "저장 중..." : "비밀번호 변경"}
+            </button>
+            {resetMessage && (
+              <button
+                type="button"
+                onClick={async () => { await handleLogout(); setAuthView("login"); }}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
+              >
+                로그인 화면으로 이동
+              </button>
+            )}
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   if (isSupabaseConfigured && !session) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
@@ -1683,40 +1800,88 @@ ${question}`;
           <div className="text-center space-y-1">
             <div className="text-3xl">🏡</div>
             <h1 className="text-lg font-bold text-slate-900">연준이네 가계부</h1>
-            <p className="text-xs text-slate-400">부부가 공유하는 계정으로 로그인하세요</p>
+            <p className="text-xs text-slate-400">
+              {authView === "forgot" ? "가입한 이메일로 재설정 링크를 받으세요" : "부부가 공유하는 계정으로 로그인하세요"}
+            </p>
           </div>
-          <form onSubmit={handleLogin} className="space-y-3" id="login_form">
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-600 block">이메일</label>
-              <input
-                type="email"
-                value={loginEmail}
-                onChange={(e) => setLoginEmail(e.target.value)}
-                required
-                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                id="login_email_input"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-600 block">비밀번호</label>
-              <input
-                type="password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                required
-                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                id="login_password_input"
-              />
-            </div>
-            {loginError && <p className="text-xs text-rose-600 font-semibold">{loginError}</p>}
-            <button
-              type="submit"
-              disabled={loginSubmitting}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
-            >
-              {loginSubmitting ? "로그인 중..." : "로그인"}
-            </button>
-          </form>
+
+          {authView === "login" ? (
+            <form onSubmit={handleLogin} className="space-y-3" id="login_form">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-600 block">이메일</label>
+                <input
+                  type="email"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  required
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  id="login_email_input"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-600 block">비밀번호</label>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  required
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  id="login_password_input"
+                />
+              </div>
+              {loginError && <p className="text-xs text-rose-600 font-semibold">{loginError}</p>}
+              <button
+                type="submit"
+                disabled={loginSubmitting}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
+              >
+                {loginSubmitting ? "로그인 중..." : "로그인"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthView("forgot");
+                  setForgotEmail(loginEmail);
+                  setForgotError("");
+                  setForgotMessage("");
+                }}
+                className="w-full text-center text-xs text-slate-400 hover:text-emerald-600 font-semibold cursor-pointer"
+                id="forgot_password_link"
+              >
+                비밀번호를 잊으셨나요?
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleForgotPassword} className="space-y-3" id="forgot_password_form">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-600 block">이메일</label>
+                <input
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  required
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  id="forgot_email_input"
+                />
+              </div>
+              {forgotError && <p className="text-xs text-rose-600 font-semibold">{forgotError}</p>}
+              {forgotMessage && <p className="text-xs text-emerald-600 font-semibold">{forgotMessage}</p>}
+              <button
+                type="submit"
+                disabled={forgotSubmitting}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
+              >
+                {forgotSubmitting ? "전송 중..." : "재설정 링크 받기"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthView("login"); setLoginError(""); }}
+                className="w-full text-center text-xs text-slate-400 hover:text-emerald-600 font-semibold cursor-pointer"
+              >
+                ← 로그인 화면으로 돌아가기
+              </button>
+            </form>
+          )}
         </div>
       </div>
     );
