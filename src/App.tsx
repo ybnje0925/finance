@@ -321,67 +321,99 @@ export default function App() {
   }, [session]);
 
   // Supabase 쓰기 헬퍼 (로컬 상태는 이미 낙관적으로 갱신되고, 이 호출들은 다른 기기와의 동기화를 위한 것)
-  const syncLedgerReplaceToSupabase = async (items: LedgerItem[]) => {
-    if (!supabase || !session) return;
-    await supabase.from("ledger_items").delete().gte("id", 0);
+  // Supabase 쓰기 실패는 그동안 조용히 무시되고 있었다(콘솔에도 안 남음) — 실패가 실제로 보이도록 항상 error를 확인해 로그로 남긴다.
+  const logSupabaseError = (label: string, error: { message: string } | null) => {
+    if (error) {
+      console.error(`[Supabase] ${label} 실패:`, error.message);
+    }
+  };
+
+  const syncLedgerReplaceToSupabase = async (items: LedgerItem[]): Promise<boolean> => {
+    if (!supabase || !session) return true;
+    const { error: delError } = await supabase.from("ledger_items").delete().gte("id", 0);
+    logSupabaseError("가계부 전체 삭제", delError);
     if (items.length > 0) {
-      await supabase.from("ledger_items").insert(items.map(i => ({
+      const { error: insError } = await supabase.from("ledger_items").insert(items.map(i => ({
         id: i.id, month: i.month, type: i.type, category: i.category, content: i.content,
         amount: i.amount, active: i.active, date: i.date, memo: i.memo || "", payment_method: i.paymentMethod || ""
       })));
+      logSupabaseError("가계부 일괄 저장", insError);
+      return !delError && !insError;
     }
+    return !delError;
   };
 
   const upsertLedgerItemToSupabase = async (item: LedgerItem) => {
     if (!supabase || !session) return;
-    await supabase.from("ledger_items").upsert({
+    const { error } = await supabase.from("ledger_items").upsert({
       id: item.id, month: item.month, type: item.type, category: item.category, content: item.content,
       amount: item.amount, active: item.active, date: item.date, memo: item.memo || "", payment_method: item.paymentMethod || ""
     });
+    logSupabaseError("가계부 항목 저장", error);
   };
 
   const deleteLedgerItemFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
-    await supabase.from("ledger_items").delete().eq("id", id);
+    const { error } = await supabase.from("ledger_items").delete().eq("id", id);
+    logSupabaseError("가계부 항목 삭제", error);
   };
 
-  const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[]) => {
-    if (!supabase || !session) return;
-    await supabase.from("asset_free_items").delete().gte("id", 0);
-    await supabase.from("asset_investment_items").delete().gte("id", 0);
-    if (free.length > 0) await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
+  const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[]): Promise<boolean> => {
+    if (!supabase || !session) return true;
+    let ok = true;
+    const { error: delFreeError } = await supabase.from("asset_free_items").delete().gte("id", 0);
+    logSupabaseError("자유입출금 자산 전체 삭제", delFreeError);
+    ok = ok && !delFreeError;
+    const { error: delInvError } = await supabase.from("asset_investment_items").delete().gte("id", 0);
+    logSupabaseError("투자 자산 전체 삭제", delInvError);
+    ok = ok && !delInvError;
+    if (free.length > 0) {
+      const { error } = await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
+      logSupabaseError("자유입출금 자산 저장", error);
+      ok = ok && !error;
+    }
     if (investments.length > 0) {
-      await supabase.from("asset_investment_items").insert(investments.map(i => ({
+      const { error } = await supabase.from("asset_investment_items").insert(investments.map(i => ({
         name: i.name, principal: i.principal, appraised: i.appraised, yield_rate: i.yieldRate
       })));
+      logSupabaseError("투자 자산 저장", error);
+      ok = ok && !error;
     }
+    return ok;
   };
 
   const upsertChecklistItemToSupabase = async (item: ChecklistItem) => {
     if (!supabase || !session) return;
-    await supabase.from("checklist_items").upsert({ id: item.id, label: item.label, done: item.done, sort_order: item.sortOrder });
+    const { error } = await supabase.from("checklist_items").upsert({ id: item.id, label: item.label, done: item.done, sort_order: item.sortOrder });
+    logSupabaseError("체크리스트 저장", error);
   };
 
   const deleteChecklistItemFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
-    await supabase.from("checklist_items").delete().eq("id", id);
+    const { error } = await supabase.from("checklist_items").delete().eq("id", id);
+    logSupabaseError("체크리스트 삭제", error);
   };
 
   const insertMortgagePaymentToSupabase = async (payment: MortgagePayment) => {
     if (!supabase || !session) return;
-    await supabase.from("mortgage_payments").insert({
+    const { error } = await supabase.from("mortgage_payments").insert({
       id: payment.id, payment_date: payment.paymentDate, amount: payment.amount, memo: payment.memo || ""
     });
+    logSupabaseError("대출 상환 기록 저장", error);
   };
 
   const deleteMortgagePaymentFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
-    await supabase.from("mortgage_payments").delete().eq("id", id);
+    const { error } = await supabase.from("mortgage_payments").delete().eq("id", id);
+    logSupabaseError("대출 상환 기록 삭제", error);
   };
 
+  // household_settings는 단일 행(id=1)이 미리 존재해야 update가 먹는데, 그 행이 없으면 update는
+  // "성공"한 것처럼 보이면서 실제로는 아무것도 반영되지 않는다. upsert로 바꿔 행이 없어도 항상 반영되게 한다.
   const updateHouseholdSettingsInSupabase = async (patch: Record<string, unknown>) => {
     if (!supabase || !session) return;
-    await supabase.from("household_settings").update(patch).eq("id", 1);
+    const { error } = await supabase.from("household_settings").upsert({ id: 1, ...patch });
+    logSupabaseError("가계 설정 저장", error);
   };
 
   // --- 2. LEDGER MONTH SELECTION & FORM STATES ---
@@ -1047,10 +1079,11 @@ ${question}`;
               const rawMemo = colIndices.memo !== -1 ? row[colIndices.memo] : undefined;
               const rawPaymentMethod = colIndices.paymentMethod !== -1 ? row[colIndices.paymentMethod] : undefined;
 
-              // "이체"(계좌 간 자금 이동)는 실제 수입도 지출도 아니므로 원장에서 제외한다.
-              if (rawType !== undefined) {
-                const transferCheck = String(rawType).trim();
-                if (["이체", "내계좌", "대체", "transfer"].some(k => transferCheck.includes(k))) continue;
+              // "이체" 중에서도 내 계좌끼리 옮긴 것(예: 대분류가 "내계좌이체")만 실제 수입/지출이 아니므로 제외한다.
+              // 다른 사람에게 보내거나 받은 이체(예: 지인에게 송금)는 실제 자금 이동이므로 금액 부호에 따라 지출/수입으로 반영한다.
+              if (rawCategory !== undefined) {
+                const transferCategoryCheck = String(rawCategory).trim();
+                if (["내계좌", "내 계좌"].some(k => transferCategoryCheck.includes(k))) continue;
               }
 
               if (rawDate === undefined && rawAmount === undefined) continue;
@@ -1147,8 +1180,6 @@ ${question}`;
 
           setLedger(uniqueItems); // Overwrite completely with the freshly uploaded ledger
           setLedgerFileName(file.name);
-          syncLedgerReplaceToSupabase(uniqueItems);
-          updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
 
           if (uniqueItems[0]?.month) {
             setSelectedMonth(uniqueItems[0].month);
@@ -1156,6 +1187,14 @@ ${question}`;
               setSelectedMonths(prev => [...prev, uniqueItems[0].month].sort());
             }
           }
+
+          syncLedgerReplaceToSupabase(uniqueItems).then(ok => {
+            if (!ok) {
+              alert("⚠️ 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
+            }
+          });
+          updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
+
           alert(`🎉 수입/지출 내역 ${uniqueItems.length}건이 성공적으로 연동되었습니다!`);
         } else {
           alert("업로드된 파일에서 유효한 수입/지출 내역 시트를 발견하지 못했습니다.");
@@ -1491,7 +1530,11 @@ ${question}`;
           if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
           if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
           setAssetsFileName(file.name);
-          syncAssetsReplaceToSupabase(combinedFree, finalInvestments);
+          syncAssetsReplaceToSupabase(combinedFree, finalInvestments).then(ok => {
+            if (!ok) {
+              alert("⚠️ 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
+            }
+          });
           updateHouseholdSettingsInSupabase({
             assets_file_name: file.name,
             ...(combinedMortgageAmount ? { mortgage_amount: combinedMortgageAmount } : {}),
