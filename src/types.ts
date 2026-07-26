@@ -23,6 +23,16 @@ export interface InvestmentItem {
   yieldRate: number;
 }
 
-export interface ChecklistState {
-  [task: string]: boolean;
+export interface ChecklistItem {
+  id: number;
+  label: string;
+  done: boolean;
+  sortOrder: number;
+}
+
+export interface MortgagePayment {
+  id: number;
+  paymentDate: string;
+  amount: number;
+  memo?: string;
 }

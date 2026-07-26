@@ -3,14 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LedgerItem, InvestmentItem, ChecklistState } from "./types";
+import { LedgerItem, InvestmentItem, ChecklistItem } from "./types";
 
 export const MOVE_IN_DATE = "2026-07-06";
 
 export const HUSBAND = {
   name: "최영범",
   birthYear: 1992,
-  creditScore: 969,
 };
 
 export const WIFE = {
@@ -42,30 +41,11 @@ export const LIABILITY_MORTGAGE = {
 };
 
 // 체크리스트
-export const INITIAL_CHECKLIST: ChecklistState = {
-  "주택담보대출 이자 및 관리비 자동이체 확인": false,
-  "어머니 육아 도우미 감사 수당 이체 확인": false,
-  "배당금 분배금(SCHD/JEPQ) 재투자 계좌 이체": false,
-};
+export const INITIAL_CHECKLIST: ChecklistItem[] = [
+  { id: 1, label: "주택담보대출 이자 및 관리비 자동이체 확인", done: false, sortOrder: 0 },
+  { id: 2, label: "어머니 육아 도우미 감사 수당 이체 확인", done: false, sortOrder: 1 },
+  { id: 3, label: "배당금 분배금(SCHD/JEPQ) 재투자 계좌 이체", done: false, sortOrder: 2 },
+];
 
 // 가계부 내역
 export const INITIAL_LEDGER: LedgerItem[] = [];
-
-export const STREAMLIT_CODE = `import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date
-
-# ------------------------------------------------------------------
-# PAGE CONFIG & STYLING
-# ------------------------------------------------------------------
-st.set_page_config(
-    page_title="우리집 통합 재정 대시보드",
-    page_icon="🏠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# ... (전체 소스 코드는 /app.py 파일을 직접 열어 보시거나 복사해 가실 수 있습니다!)
-`;

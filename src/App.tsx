@@ -14,11 +14,9 @@ import {
   Trash2, 
   Percent, 
   ArrowRight, 
-  MapPin, 
-  User, 
-  Code, 
-  Copy, 
-  Check, 
+  MapPin,
+  User,
+  Check,
   AlertTriangle, 
   HelpCircle,
   PiggyBank,
@@ -30,7 +28,9 @@ import {
 } from "lucide-react";
 import { read, utils } from "xlsx";
 import { GoogleGenAI } from "@google/genai";
-import { LedgerItem, InvestmentItem, ChecklistState } from "./types";
+import type { Session } from "@supabase/supabase-js";
+import { supabase, isSupabaseConfigured } from "./supabaseClient";
+import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment } from "./types";
 import { 
   MOVE_IN_DATE, 
   HUSBAND, 
@@ -160,7 +160,7 @@ function SVGMultiPieChart({ items }: { items: [string, number][] }) {
 
 export default function App() {
   // --- 1. LOCAL STORAGE & STATE INITIALIZATION ---
-  const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "analysis" | "assets" | "streamlit">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "analysis" | "assets">("overview");
   const [ledgerFileName, setLedgerFileName] = useState<string | null>(null);
   const [assetsFileName, setAssetsFileName] = useState<string | null>(null);
 
@@ -187,12 +187,20 @@ export default function App() {
     return INITIAL_LEDGER;
   });
 
-  const [checklist, setChecklist] = useState<ChecklistState>(() => {
-    const saved = localStorage.getItem("VIVALDI_CHECKLIST");
+  const [checklist, setChecklist] = useState<ChecklistItem[]>(() => {
+    const saved = localStorage.getItem("VIVALDI_CHECKLIST_V2");
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { /* ignore */ }
     }
     return INITIAL_CHECKLIST;
+  });
+
+  const [mortgagePayments, setMortgagePayments] = useState<MortgagePayment[]>(() => {
+    const saved = localStorage.getItem("VIVALDI_MORTGAGE_PAYMENTS");
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+    }
+    return [];
   });
 
   useEffect(() => {
@@ -200,8 +208,181 @@ export default function App() {
   }, [ledger]);
 
   useEffect(() => {
-    localStorage.setItem("VIVALDI_CHECKLIST", JSON.stringify(checklist));
+    localStorage.setItem("VIVALDI_CHECKLIST_V2", JSON.stringify(checklist));
   }, [checklist]);
+
+  useEffect(() => {
+    localStorage.setItem("VIVALDI_MORTGAGE_PAYMENTS", JSON.stringify(mortgagePayments));
+  }, [mortgagePayments]);
+
+  // --- 0. SUPABASE AUTH (부부 공유 로그인) ---
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginSubmitting, setLoginSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase) return;
+    setLoginSubmitting(true);
+    setLoginError("");
+    const { error } = await supabase.auth.signInWithPassword({ email: loginEmail.trim(), password: loginPassword });
+    if (error) setLoginError(error.message);
+    setLoginSubmitting(false);
+  };
+
+  const handleLogout = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+  };
+
+  // --- 0b. SUPABASE DATA SYNC (영구 저장 + 부부간 실시간 공유) ---
+  useEffect(() => {
+    if (!supabase || !session) return;
+    let cancelled = false;
+
+    const fetchAll = async () => {
+      if (!supabase) return;
+      const [ledgerRes, freeRes, investRes, checklistRes, paymentsRes, settingsRes] = await Promise.all([
+        supabase.from("ledger_items").select("*"),
+        supabase.from("asset_free_items").select("*"),
+        supabase.from("asset_investment_items").select("*"),
+        supabase.from("checklist_items").select("*").order("sort_order", { ascending: true }),
+        supabase.from("mortgage_payments").select("*").order("payment_date", { ascending: true }),
+        supabase.from("household_settings").select("*").eq("id", 1).maybeSingle()
+      ]);
+      if (cancelled) return;
+
+      if (ledgerRes.data && ledgerRes.data.length > 0) {
+        setLedger(ledgerRes.data.map((r: any) => ({
+          id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
+          amount: Number(r.amount), active: r.active, date: r.date,
+          memo: r.memo || "", paymentMethod: r.payment_method || ""
+        })));
+      }
+      if (freeRes.data && freeRes.data.length > 0) {
+        setFreeAssets(freeRes.data.map((r: any) => ({ name: r.name, amount: Number(r.amount) })));
+      }
+      if (investRes.data && investRes.data.length > 0) {
+        setInvestmentAssets(investRes.data.map((r: any) => ({
+          name: r.name, principal: Number(r.principal), appraised: Number(r.appraised), yieldRate: Number(r.yield_rate)
+        })));
+      }
+      if (checklistRes.data && checklistRes.data.length > 0) {
+        setChecklist(checklistRes.data.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
+      }
+      if (paymentsRes.data) {
+        setMortgagePayments(paymentsRes.data.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
+      }
+      if (settingsRes.data) {
+        LIABILITY_MORTGAGE.name = settingsRes.data.mortgage_name;
+        LIABILITY_MORTGAGE.amount = Number(settingsRes.data.mortgage_amount);
+        LIABILITY_MORTGAGE.rate = Number(settingsRes.data.mortgage_rate);
+        if (settingsRes.data.mortgage_start_date) LIABILITY_MORTGAGE.startDate = settingsRes.data.mortgage_start_date;
+        if (settingsRes.data.mortgage_end_date) LIABILITY_MORTGAGE.endDate = settingsRes.data.mortgage_end_date;
+        if (settingsRes.data.ledger_file_name) setLedgerFileName(settingsRes.data.ledger_file_name);
+        if (settingsRes.data.assets_file_name) setAssetsFileName(settingsRes.data.assets_file_name);
+      }
+    };
+
+    fetchAll();
+
+    const channel = supabase
+      .channel("household_sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "ledger_items" }, fetchAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "asset_free_items" }, fetchAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "asset_investment_items" }, fetchAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "checklist_items" }, fetchAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "mortgage_payments" }, fetchAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "household_settings" }, fetchAll)
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [session]);
+
+  // Supabase 쓰기 헬퍼 (로컬 상태는 이미 낙관적으로 갱신되고, 이 호출들은 다른 기기와의 동기화를 위한 것)
+  const syncLedgerReplaceToSupabase = async (items: LedgerItem[]) => {
+    if (!supabase || !session) return;
+    await supabase.from("ledger_items").delete().gte("id", 0);
+    if (items.length > 0) {
+      await supabase.from("ledger_items").insert(items.map(i => ({
+        id: i.id, month: i.month, type: i.type, category: i.category, content: i.content,
+        amount: i.amount, active: i.active, date: i.date, memo: i.memo || "", payment_method: i.paymentMethod || ""
+      })));
+    }
+  };
+
+  const upsertLedgerItemToSupabase = async (item: LedgerItem) => {
+    if (!supabase || !session) return;
+    await supabase.from("ledger_items").upsert({
+      id: item.id, month: item.month, type: item.type, category: item.category, content: item.content,
+      amount: item.amount, active: item.active, date: item.date, memo: item.memo || "", payment_method: item.paymentMethod || ""
+    });
+  };
+
+  const deleteLedgerItemFromSupabase = async (id: number) => {
+    if (!supabase || !session) return;
+    await supabase.from("ledger_items").delete().eq("id", id);
+  };
+
+  const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[]) => {
+    if (!supabase || !session) return;
+    await supabase.from("asset_free_items").delete().gte("id", 0);
+    await supabase.from("asset_investment_items").delete().gte("id", 0);
+    if (free.length > 0) await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
+    if (investments.length > 0) {
+      await supabase.from("asset_investment_items").insert(investments.map(i => ({
+        name: i.name, principal: i.principal, appraised: i.appraised, yield_rate: i.yieldRate
+      })));
+    }
+  };
+
+  const upsertChecklistItemToSupabase = async (item: ChecklistItem) => {
+    if (!supabase || !session) return;
+    await supabase.from("checklist_items").upsert({ id: item.id, label: item.label, done: item.done, sort_order: item.sortOrder });
+  };
+
+  const deleteChecklistItemFromSupabase = async (id: number) => {
+    if (!supabase || !session) return;
+    await supabase.from("checklist_items").delete().eq("id", id);
+  };
+
+  const insertMortgagePaymentToSupabase = async (payment: MortgagePayment) => {
+    if (!supabase || !session) return;
+    await supabase.from("mortgage_payments").insert({
+      id: payment.id, payment_date: payment.paymentDate, amount: payment.amount, memo: payment.memo || ""
+    });
+  };
+
+  const deleteMortgagePaymentFromSupabase = async (id: number) => {
+    if (!supabase || !session) return;
+    await supabase.from("mortgage_payments").delete().eq("id", id);
+  };
+
+  const updateHouseholdSettingsInSupabase = async (patch: Record<string, unknown>) => {
+    if (!supabase || !session) return;
+    await supabase.from("household_settings").update(patch).eq("id", 1);
+  };
 
   // --- 2. LEDGER MONTH SELECTION & FORM STATES ---
   const uniqueMonths = Array.from(new Set(ledger.map(item => item.month))).sort() as string[];
@@ -431,7 +612,6 @@ export default function App() {
   const [formCategory, setFormCategory] = useState("식비");
   const [formContent, setFormContent] = useState("");
   const [formAmount, setFormAmount] = useState<number>(100000);
-  const [copiedCode, setCopiedCode] = useState(false);
 
   useEffect(() => {
     setFormDate(prev => {
@@ -725,6 +905,7 @@ export default function App() {
     };
 
     setLedger(prev => [...prev, newItem]);
+    upsertLedgerItemToSupabase(newItem);
     setFormContent("");
     // Switch filter to the month of the added item so they see it
     setSelectedMonth(formMonth);
@@ -866,6 +1047,12 @@ ${question}`;
               const rawMemo = colIndices.memo !== -1 ? row[colIndices.memo] : undefined;
               const rawPaymentMethod = colIndices.paymentMethod !== -1 ? row[colIndices.paymentMethod] : undefined;
 
+              // "이체"(계좌 간 자금 이동)는 실제 수입도 지출도 아니므로 원장에서 제외한다.
+              if (rawType !== undefined) {
+                const transferCheck = String(rawType).trim();
+                if (["이체", "내계좌", "대체", "transfer"].some(k => transferCheck.includes(k))) continue;
+              }
+
               if (rawDate === undefined && rawAmount === undefined) continue;
 
               let originalAmount = 0;
@@ -960,6 +1147,8 @@ ${question}`;
 
           setLedger(uniqueItems); // Overwrite completely with the freshly uploaded ledger
           setLedgerFileName(file.name);
+          syncLedgerReplaceToSupabase(uniqueItems);
+          updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
 
           if (uniqueItems[0]?.month) {
             setSelectedMonth(uniqueItems[0].month);
@@ -993,7 +1182,6 @@ ${question}`;
         // 마지막 시트만 남는 버그가 있었음 - 부부 각자 시트를 합산하려면 누적이 필수).
         const combinedFree: typeof ASSET_FREE_DEPOSITS = [];
         const combinedInvestMap = new Map<string, InvestmentItem>();
-        let combinedCreditScore: number | null = null;
         let combinedMortgageAmount: number | null = null;
         let combinedMortgageRate: number | null = null;
 
@@ -1020,7 +1208,6 @@ ${question}`;
             if (textContent.includes("고객정보") || textContent.includes("재무현황") || textContent.includes("투자현황") || textContent.includes("대출현황")) {
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newInvestments: typeof ASSET_INVESTMENTS = [];
-              let creditScore: number | null = null;
               let mortgageAmount: number | null = null;
               let mortgageRate: number | null = null;
 
@@ -1177,21 +1364,6 @@ ${question}`;
                 break;
               }
 
-              // 신용점수(KCB 등) 탐지 - 문서 어디에나 있으면 인식
-              for (let r = 0; r < rows.length; r++) {
-                const row = rows[r];
-                if (!row) continue;
-                const rowStr = row.map(c => String(c || "")).join(" ");
-                if (rowStr.includes("신용점수") || rowStr.toLowerCase().includes("kcb")) {
-                  const nextRow = rows[r + 1] || [];
-                  for (const val of [...row, ...nextRow]) {
-                    const num = parseInt(String(val).replace(/[^0-9]/g, ""));
-                    if (num >= 300 && num <= 1000) { creditScore = num; break; }
-                  }
-                }
-                if (creditScore) break;
-              }
-
               if (assetHeaderRowIdx !== -1) {
                 newInvestments.push(...Array.from(investMap.values()));
 
@@ -1199,7 +1371,6 @@ ${question}`;
                   if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
                 });
                 newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
-                if (creditScore) combinedCreditScore = creditScore;
                 if (mortgageAmount) combinedMortgageAmount = mortgageAmount;
                 if (mortgageRate) combinedMortgageRate = mortgageRate;
 
@@ -1312,14 +1483,20 @@ ${question}`;
         }
 
         if (anySheetParsed) {
+          const finalInvestments = Array.from(combinedInvestMap.values());
           setFreeAssets(combinedFree);
           setSavingsAssets([]);
           setElectronicAssets([]);
-          setInvestmentAssets(Array.from(combinedInvestMap.values()));
-          if (combinedCreditScore) HUSBAND.creditScore = combinedCreditScore;
+          setInvestmentAssets(finalInvestments);
           if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
           if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
           setAssetsFileName(file.name);
+          syncAssetsReplaceToSupabase(combinedFree, finalInvestments);
+          updateHouseholdSettingsInSupabase({
+            assets_file_name: file.name,
+            ...(combinedMortgageAmount ? { mortgage_amount: combinedMortgageAmount } : {}),
+            ...(combinedMortgageRate ? { mortgage_rate: combinedMortgageRate } : {})
+          });
           alert(`🏦 자산/부채 현황 ${assetsSuccessCount}개 계좌가 성공적으로 연동되었습니다!`);
         } else {
           alert("업로드된 파일에서 유효한 자산/부채 현황 정보를 찾지 못했습니다.");
@@ -1334,20 +1511,69 @@ ${question}`;
 
   // Toggle item active state
   const handleToggleItem = (id: number) => {
-    setLedger(prev => prev.map(item => item.id === id ? { ...item, active: !item.active } : item));
+    setLedger(prev => {
+      const next = prev.map(item => item.id === id ? { ...item, active: !item.active } : item);
+      const toggled = next.find(item => item.id === id);
+      if (toggled) upsertLedgerItemToSupabase(toggled);
+      return next;
+    });
   };
 
   // Delete ledger item
   const handleDeleteItem = (id: number) => {
     setLedger(prev => prev.filter(item => item.id !== id));
+    deleteLedgerItemFromSupabase(id);
   };
 
-  // Toggle checklist
-  const handleToggleChecklist = (task: string) => {
-    setChecklist(prev => ({
-      ...prev,
-      [task]: !prev[task]
-    }));
+  // 체크리스트: 추가/토글/수정/삭제 (Supabase에 저장되어 재접속·다른 기기에서도 유지됨)
+  const handleAddChecklistItem = (label: string) => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    const newItem: ChecklistItem = {
+      id: Date.now(),
+      label: trimmed,
+      done: false,
+      sortOrder: checklist.length > 0 ? Math.max(...checklist.map(c => c.sortOrder)) + 1 : 0
+    };
+    setChecklist(prev => [...prev, newItem]);
+    upsertChecklistItemToSupabase(newItem);
+  };
+
+  const handleToggleChecklistItem = (id: number) => {
+    setChecklist(prev => {
+      const next = prev.map(item => item.id === id ? { ...item, done: !item.done } : item);
+      const toggled = next.find(item => item.id === id);
+      if (toggled) upsertChecklistItemToSupabase(toggled);
+      return next;
+    });
+  };
+
+  // 입력 중에는 로컬 상태만 갱신하고(타자마다 Supabase에 쓰지 않도록), blur 시점에만 서버에 반영한다.
+  const handleChecklistLabelChange = (id: number, newLabel: string) => {
+    setChecklist(prev => prev.map(item => item.id === id ? { ...item, label: newLabel } : item));
+  };
+
+  const handleChecklistLabelBlur = (id: number) => {
+    const item = checklist.find(c => c.id === id);
+    if (item && item.label.trim()) upsertChecklistItemToSupabase(item);
+  };
+
+  const handleDeleteChecklistItem = (id: number) => {
+    setChecklist(prev => prev.filter(item => item.id !== id));
+    deleteChecklistItemFromSupabase(id);
+  };
+
+  // 대출 상환 기록 추가/삭제
+  const handleAddMortgagePayment = (paymentDate: string, amount: number, memo: string) => {
+    if (!paymentDate || amount <= 0) return;
+    const newPayment: MortgagePayment = { id: Date.now(), paymentDate, amount, memo };
+    setMortgagePayments(prev => [...prev, newPayment].sort((a, b) => a.paymentDate.localeCompare(b.paymentDate)));
+    insertMortgagePaymentToSupabase(newPayment);
+  };
+
+  const handleDeleteMortgagePayment = (id: number) => {
+    setMortgagePayments(prev => prev.filter(p => p.id !== id));
+    deleteMortgagePaymentFromSupabase(id);
   };
 
   // Delete all ledger items
@@ -1355,6 +1581,8 @@ ${question}`;
     if (window.confirm("수입/지출 데이터를 완전히 비우고 초기화하시겠습니까? (기본 샘플도 제거됩니다)")) {
       setLedger([]);
       setLedgerFileName(null);
+      syncLedgerReplaceToSupabase([]);
+      updateHouseholdSettingsInSupabase({ ledger_file_name: null });
     }
   };
 
@@ -1366,6 +1594,8 @@ ${question}`;
       setElectronicAssets([]);
       setInvestmentAssets([]);
       setAssetsFileName(null);
+      syncAssetsReplaceToSupabase([], []);
+      updateHouseholdSettingsInSupabase({ assets_file_name: null });
     }
   };
 
@@ -1379,343 +1609,79 @@ ${question}`;
       setElectronicAssets([]);
       setInvestmentAssets([]);
       setAssetsFileName(null);
-      HUSBAND.creditScore = 947;
+      setMortgagePayments([]);
       LIABILITY_MORTGAGE.amount = 600000000;
       LIABILITY_MORTGAGE.rate = 4.08;
+      syncLedgerReplaceToSupabase([]);
+      syncAssetsReplaceToSupabase([], []);
+      updateHouseholdSettingsInSupabase({
+        ledger_file_name: null,
+        assets_file_name: null,
+        mortgage_amount: 600000000,
+        mortgage_rate: 4.08
+      });
+      mortgagePayments.forEach(p => deleteMortgagePaymentFromSupabase(p.id));
     }
   };
 
-  // Copy python code to clipboard
-  const handleCopyCode = () => {
-    // Exact Python script
-    const code = getFullPythonCode();
-    navigator.clipboard.writeText(code);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
-  };
+  // --- SUPABASE AUTH GATE ---
+  if (isSupabaseConfigured && authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="text-slate-400 text-sm font-bold animate-pulse">불러오는 중...</div>
+      </div>
+    );
+  }
 
-  // Raw full script generator
-  const getFullPythonCode = () => {
-    return `import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date
-
-# ------------------------------------------------------------------
-# 0. PAGE CONFIG & STYLING
-# ------------------------------------------------------------------
-st.set_page_config(
-    page_title="우리집 통합 재정 대시보드",
-    page_icon="🏠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom Styling (CSS)
-st.markdown("""
-<style>
-    .reportview-container {
-        background: #F8F9FA;
-    }
-    .metric-card {
-        background-color: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        border: 1px solid #E9ECEF;
-    }
-    .warning-card {
-        background-color: #FFF5F5;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #FEB2B2;
-        color: #C53030;
-    }
-    .highlight-text {
-        font-weight: bold;
-        color: #2B6CB0;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ------------------------------------------------------------------
-# 1. CORE DATA PREPARATION (SESSION STATE INIT)
-# ------------------------------------------------------------------
-
-HUSBAND_NAME = "최영범 (1992년생)"
-HUSBAND_CREDIT = 969
-WIFE_NAME = "강재은 (1989년생)"
-MOVE_IN_DATE = date(2026, 7, 6)
-
-ASSET_FREE = {
-    "KB Star*t통장-저축예금": 3931685,
-    "KB Wise통장-저축예금": 13090630,
-    "KB국민ONE통장-저축예금": 41,
-    "MY 입출금통장": 2,
-    "NH주거래우대통장": 3269297,
-    "U드림 저축예금": 1107,
-    "WON 통장": 126,
-    "기타 입출금통장 1": 6449648,
-    "기타 입출금통장 2": 7000,
-    "저금통": 41506
-}
-
-ASSET_SAVINGS = {
-    "NH올원e적금": 100000
-}
-
-ASSET_ELECTRONIC = {
-    "카카오페이 머니": 12000
-}
-
-ASSET_INVESTMENT = {
-    "TIGER 미국S&P500 (평가금액)": 1919980,
-    "KODEX 차이나테크TOP10 (평가금액)": 1726080,
-    "100세연금저축펀드": 20105,
-    "CMA계좌": 446955,
-    "종합위탁계좌": 693121
-}
-
-INVESTMENT_DETAILS = {
-    "TIGER 미국S&P500": {"원금": 1277189, "평가액": 1919980, "수익률": 50.33},
-    "KODEX 차이나테크TOP10": {"원금": 1737959, "평가액": 1726080, "수익률": -0.68}
-}
-
-LIABILITY_MORTGAGE = {
-    "명칭": "NH주택담보대출 (주택자금)",
-    "금액": 600000000,
-    "금리": 4.08,
-    "대출일": date(2026, 6, 19),
-    "만기일": date(2056, 5, 23)
-}
-
-if 'ledger' not in st.session_state:
-    st.session_state.ledger = [
-        {"id": 1, "월": "2026-06", "구분": "수입", "대분류": "급여", "내용": "최영범 급여", "금액": 4500000, "활성화": True},
-        {"id": 2, "월": "2026-06", "구분": "수입", "대분류": "급여", "내용": "강재은 급여", "금액": 3800000, "활성화": True},
-        {"id": 3, "월": "2026-06", "구분": "수입", "대분류": "투자/배당", "내용": "SCHD 배당금", "금액": 45000, "활성화": True},
-        {"id": 4, "월": "2026-06", "구분": "지출", "대분류": "주거/대출", "내용": "NH주담대 이자 (일할)", "금액": 816000, "활성화": True},
-        {"id": 5, "월": "2026-06", "구분": "지출", "대분류": "식비", "내용": "이마트 장보기", "금액": 320000, "활성화": True},
-        {"id": 6, "월": "2026-06", "구분": "지출", "대분류": "기타", "내용": "생활 소모품 구매", "금액": 150000, "활성화": True},
-        {"id": 7, "월": "2026-07", "구분": "수입", "대분류": "급여", "내용": "최영범 급여", "금액": 4500000, "활성화": True},
-        {"id": 8, "월": "2026-07", "구분": "수입", "대분류": "급여", "내용": "강재은 급여", "금액": 3800000, "활성화": True},
-        {"id": 9, "월": "2026-07", "구분": "수입", "대분류": "투자/배당", "내용": "JEPQ 배당금", "금액": 32000, "활성화": True},
-        {"id": 10, "월": "2026-07", "구분": "지출", "대분류": "주거/대출", "내용": "NH주담대 이자 (첫 정기)", "금액": 2040000, "활성화": True},
-        {"id": 11, "월": "2026-07", "구분": "지출", "대분류": "양육/기타", "내용": "육아도우미 어머니 감사수당", "금액": 1200000, "활성화": True},
-        {"id": 12, "월": "2026-07", "구분": "지출", "대분류": "식비", "내용": "하남 감이동 이사 턱 외식", "금액": 250000, "활성화": True},
-        {"id": 13, "월": "2026-07", "구분": "지출", "대분류": "공과금/관리비", "내용": "아파트 첫 관리비", "금액": 220000, "활성화": True},
-        {"id": 14, "월": "2026-07", "구분": "지출", "대분류": "식비", "내용": "새 아파트 집들이 장보기", "금액": 350000, "활성화": True},
-        {"id": 15, "월": "2026-08", "구분": "수입", "대분류": "급여", "내용": "최영범 급여", "금액": 4500000, "활성화": True},
-        {"id": 16, "월": "2026-08", "구분": "수입", "대분류": "급여", "내용": "강재은 급여", "금액": 3800000, "활성화": True},
-        {"id": 17, "월": "2026-08", "구분": "지출", "대분류": "주거/대출", "내용": "NH주담대 이자", "금액": 2040000, "활성화": True},
-        {"id": 18, "월": "2026-08", "구분": "지출", "대분류": "양육/기타", "내용": "육아도우미 감사수당", "금액": 1200000, "활성화": True},
-        {"id": 19, "월": "2026-08", "구분": "지출", "대분류": "식비", "내용": "이마트 및 외식", "금액": 600000, "활성화": True}
-    ]
-
-if 'checklist' not in st.session_state:
-    st.session_state.checklist = {
-        "주택담보대출 이자 및 관리비 자동이체 확인": False,
-        "어머니 육아 도우미 감사 수당 이체 확인": False,
-        "배당금 분배금(SCHD/JEPQ) 재투자 계좌 이체": False
-    }
-
-# ------------------------------------------------------------------
-# 2. SIDEBAR CONFIG
-# ------------------------------------------------------------------
-with st.sidebar:
-    st.image("https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=200&q=80", width=120)
-    st.title("🏡 감이동 비발디")
-    st.subheader("우리집 통합 재정 대시보드")
-    st.markdown("---")
-    st.markdown("### 👨‍👩‍👦 가계 구성원")
-    st.markdown(f"- **남편:** {HUSBAND_NAME}")
-    st.markdown(f"- **아내:** {WIFE_NAME}")
-    st.markdown(f"- **입주일:** \`{MOVE_IN_DATE}\`")
-    st.markdown("---")
-    st.info("💡 **리액티브 피드백**: 탭 2의 체크박스를 조절하거나 새로운 모의 데이터를 넣으면 차트와 가계 총액이 실시간 반영됩니다!")
-
-# ------------------------------------------------------------------
-# 3. TABS STRUCTURE
-# ------------------------------------------------------------------
-tab_home, tab_ledger, tab_analysis = st.tabs(["🏠 총괄 대시보드", "💸 지출과 수입", "📈 자산 및 부채"])
-
-# ==================================================================
-# TAB 1: 🏠 총괄 대시보드
-# ==================================================================
-with tab_home:
-    today_date = date.today()
-    days_since_move = (today_date - MOVE_IN_DATE).days
-    
-    st.markdown("<h2 style='text-align: center; color: #2D3748;'>🎉 경축! 감이동 한라비발디 입주 완료</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align: center; font-size: 1.3rem; color: #4A5568;'>하남시 감이동 한라비발디로 이사한 지 오늘로 <span style='font-size: 1.8rem; font-weight: bold; color: #3182CE;'>{days_since_move}일째</span> 되었습니다.</p>", unsafe_allow_html=True)
-    st.markdown("---")
-
-    total_free = sum(ASSET_FREE.values())
-    total_savings = sum(ASSET_SAVINGS.values())
-    total_electronic = sum(ASSET_ELECTRONIC.values())
-    total_investment = sum(ASSET_INVESTMENT.values())
-    
-    total_asset_sum = total_free + total_savings + total_electronic + total_investment
-    total_liability_sum = LIABILITY_MORTGAGE["금액"]
-    net_asset = total_asset_sum - total_liability_sum
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric(label="💵 총 금융자산", value=f"{total_asset_sum:,.0f} 원", delta="예적금 + 투자 자산")
-    with col2:
-        st.metric(label="🚨 총 부채 (장기대출)", value=f"{total_liability_sum:,.0f} 원", delta="NH 주택담보대출", delta_color="inverse")
-    with col3:
-        if net_asset < 0:
-            st.metric(label="📉 순금융자산 (자산-부채)", value=f"{net_asset:,.0f} 원", delta="⚠️ 순자산 마이너스 상태 (내집마련 대출 반영)", delta_color="inverse")
-        else:
-            st.metric(label="📈 순금융자산 (자산-부채)", value=f"{net_asset:,.0f} 원", delta="순자산 양수 상태")
-    with col4:
-        st.metric(label="⭐️ 아빠 신용점수", value=f"{HUSBAND_CREDIT} 점", delta="KB국민 등급 최상위")
-
-    if net_asset < 0:
-        st.markdown(f\"\"\"
-        <div class="warning-card">
-            <strong>⚠️ 가계 순금융자산 경보</strong><br>
-            현재 총 부채({total_liability_sum:,.0f}원)가 금융 자산({total_asset_sum:,.0f}원)보다 많아 순자산이 
-            <strong>{net_asset:,.0f}원</strong>으로 마이너스 상태입니다. 이는 주택 구매를 위한 주택담보대출 실행에 따른 정상적인 흐름입니다.
+  if (isSupabaseConfigured && !session) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
+        <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
+          <div className="text-center space-y-1">
+            <div className="text-3xl">🏡</div>
+            <h1 className="text-lg font-bold text-slate-900">연준이네 가계부</h1>
+            <p className="text-xs text-slate-400">부부가 공유하는 계정으로 로그인하세요</p>
+          </div>
+          <form onSubmit={handleLogin} className="space-y-3" id="login_form">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-600 block">이메일</label>
+              <input
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                required
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                id="login_email_input"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-600 block">비밀번호</label>
+              <input
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                required
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                id="login_password_input"
+              />
+            </div>
+            {loginError && <p className="text-xs text-rose-600 font-semibold">{loginError}</p>}
+            <button
+              type="submit"
+              disabled={loginSubmitting}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
+            >
+              {loginSubmitting ? "로그인 중..." : "로그인"}
+            </button>
+          </form>
         </div>
-        \"\"\", unsafe_allow_html=True)
-
-    col_left, col_right = st.columns([2, 1])
-    with col_left:
-        st.markdown("### 📋 이번 달 가계 주요 체크리스트")
-        for task, checked in st.session_state.checklist.items():
-            st.session_state.checklist[task] = st.checkbox(task, value=checked)
-        completed_tasks = sum(st.session_state.checklist.values())
-        total_tasks = len(st.session_state.checklist)
-        progress = completed_tasks / total_tasks
-        st.write(f"**미션 완료율:** {completed_tasks}/{total_tasks} ({progress*100:.0f}%)")
-        st.progress(progress)
-        
-    with col_right:
-        st.markdown("### 🏦 감이동 한라비발디 대출 현황")
-        st.markdown(f\"\"\"
-        - **대출기관:** NH농협은행
-        - **대출금리:** \`{LIABILITY_MORTGAGE['금리']}%\` (고정/변동 혼합)
-        - **신규일자:** \`{LIABILITY_MORTGAGE['대출일']}\`
-        - **만기일자:** \`{LIABILITY_MORTGAGE['만기일']}\`
-        - **월 고정이자 예상액:** <span class='highlight-text'>{(total_liability_sum * (LIABILITY_MORTGAGE['금리']/100) / 12):,.0f}원</span>
-        \"\"\", unsafe_allow_html=True)
-
-# ==================================================================
-# TAB 2: 💸 지출과 수입 (Interactive Ledger)
-# ==================================================================
-with tab_ledger:
-    st.markdown("### 💸 월별 가계부 및 지출·수입 제어기")
-    available_months = sorted(list(set([item["월"] for item in st.session_state.ledger])))
-    col_select, _ = st.columns([1, 2])
-    with col_select:
-        selected_month = st.selectbox("📅 조회 대상 월 선택", available_months, index=len(available_months)-1)
-    
-    filtered_items = [item for item in st.session_state.ledger if item["월"] == selected_month]
-    col_inc_table, col_exp_table = st.columns(2)
-    
-    with col_inc_table:
-        st.markdown("##### 🟢 수입 내역")
-        inc_items = [item for item in filtered_items if item["구분"] == "수입"]
-        for item in inc_items:
-            cb_key = f"ledger_item_{item['id']}"
-            is_active = st.checkbox(f"[{item['대분류']}] {item['내용']} | {item['금액']:,.0f}원", value=item["활성화"], key=cb_key)
-            for original in st.session_state.ledger:
-                if original["id"] == item["id"]:
-                    original["활성화"] = is_active
-            
-    with col_exp_table:
-        st.markdown("##### 🔴 지출 내역")
-        exp_items = [item for item in filtered_items if item["구분"] == "지출"]
-        for item in exp_items:
-            cb_key = f"ledger_item_{item['id']}"
-            is_active = st.checkbox(f"[{item['대분류']}] {item['내용']} | {item['금액']:,.0f}원", value=item["활성화"], key=cb_key)
-            for original in st.session_state.ledger:
-                if original["id"] == item["id"]:
-                    original["활성화"] = is_active
-
-    active_inc_total = sum([item["금액"] for item in st.session_state.ledger if item["월"] == selected_month and item["구분"] == "수입" and item["활성화"]])
-    active_exp_total = sum([item["금액"] for item in st.session_state.ledger if item["월"] == selected_month and item["구분"] == "지출" and item["활성화"]])
-    net_monthly_income = active_inc_total - active_exp_total
-
-    st.markdown("---")
-    col_res1, col_res2, col_res3 = st.columns(3)
-    with col_res1:
-        st.metric("🟢 선택 수입 총계", f"{active_inc_total:,.0f} 원")
-    with col_res2:
-        st.metric("🔴 선택 지출 총계", f"{active_exp_total:,.0f} 원")
-    with col_res3:
-        if net_monthly_income >= 0:
-            st.metric("📊 당월 최종 순수입", f"{net_monthly_income:,.0f} 원", delta="흑자 상태")
-        else:
-            st.metric("📊 당월 최종 순수입", f"{net_monthly_income:,.0f} 원", delta="⚠️ 가계 적자 상태", delta_color="inverse")
-
-    st.markdown("---")
-    with st.form("add_ledger_item_form", clear_on_submit=True):
-        f_month = st.selectbox("입력할 대상 년월", ["2026-06", "2026-07", "2026-08", "2026-09"])
-        f_type = st.radio("구분", ["수입", "지출"], horizontal=True)
-        f_category = st.selectbox("대분류", ["급여", "투자/배당", "주거/대출", "식비", "공과금/관리비", "양육/기타", "생활용품", "여가/문화"])
-        f_memo = st.text_input("내용 및 메모")
-        f_amount = st.number_input("금액 (원)", min_value=0, value=100000, step=10000)
-        submit_btn = st.form_submit_button("원장에 임시 추가")
-        if submit_btn:
-            new_id = max([item["id"] for item in st.session_state.ledger]) + 1 if st.session_state.ledger else 1
-            new_item = {"id": new_id, "월": f_month, "구분": f_type, "대분류": f_category, "내용": f_memo, "금액": f_amount, "활성화": True}
-            st.session_state.ledger.append(new_item)
-            st.success("추가되었습니다!")
-            st.rerun()
-
-# ==================================================================
-# TAB 3: 📈 자산 및 부채
-# ==================================================================
-with tab_analysis:
-    col_chart_l, col_chart_r = st.columns(2)
-    with col_chart_l:
-        st.markdown("#### 🍩 예적금·현금 vs 투자성 자산 비율")
-        cash_like = total_free + total_savings + total_electronic
-        invest_like = total_investment
-        fig_pie = go.Figure(data=[go.Pie(labels=["예적금 및 현금자산", "투자성 자산"], values=[cash_like, invest_like], hole=.45, marker_colors=["#4299E1", "#ED8936"])])
-        fig_pie.update_layout(height=300, showlegend=True)
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with col_chart_r:
-        st.markdown("#### 📊 주요 주식 종목 평가")
-        stock_labels = list(INVESTMENT_DETAILS.keys())
-        principal_vals = [INVESTMENT_DETAILS[s]["원금"] for s in stock_labels]
-        appraised_vals = [INVESTMENT_DETAILS[s]["평가액"] for s in stock_labels]
-        fig_bar = go.Figure(data=[go.Bar(name="투자 원금", x=stock_labels, y=principal_vals), go.Bar(name="평가 금액", x=stock_labels, y=appraised_vals)])
-        fig_bar.update_layout(barmode='group', height=300)
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### 📈 월별 가계 수입 대 지출 트렌드 분석")
-    months_stat = sorted(list(set([item["월"] for item in st.session_state.ledger])))
-    inc_trends = [sum([item["금액"] for item in st.session_state.ledger if item["월"] == m and item["구분"] == "수입" and item["활성화"]]) for m in months_stat]
-    exp_trends = [sum([item["금액"] for item in st.session_state.ledger if item["월"] == m and item["구분"] == "지출" and item["활성화"]]) for m in months_stat]
-    df_trend = pd.DataFrame({"조회월": months_stat, "실질수입": inc_trends, "실질지출": exp_trends})
-    fig_trend = go.Figure()
-    fig_trend.add_trace(go.Bar(x=df_trend["조회월"], y=df_trend["실질수입"], name="실질 수입", marker_color="#48BB78"))
-    fig_trend.add_trace(go.Bar(x=df_trend["조회월"], y=df_trend["실질지출"], name="실질 지출", marker_color="#F56565"))
-    st.plotly_chart(fig_trend, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### 🧮 NH 주택담보대출 조기 상환 시뮬레이터")
-    col_sim_l, col_sim_r = st.columns([1, 2])
-    with col_sim_l:
-        sim_loan = st.number_input("대출 원금 (원)", value=LIABILITY_MORTGAGE["금액"])
-        sim_rate = st.slider("대출 이자율 (%)", min_value=1.0, max_value=10.0, value=LIABILITY_MORTGAGE["금리"])
-        monthly_repay = st.number_input("기본 월 약정 원리금 상환액", value=2500000)
-        extra_monthly = st.slider("매월 추가 원금 중도상환액", min_value=0, max_value=5000000, value=1000000)
-        
-    # (Amortization logic computes payoff months and displays in st.metric)
-`;
-  };
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col md:flex-row font-sans" id="app_root">
-      
+
       {/* --- SIDEBAR --- */}
       <aside className="w-full md:w-80 bg-slate-900 text-white flex flex-col border-r border-slate-800 shrink-0 print:hidden" id="sidebar">
         
@@ -1831,6 +1797,16 @@ with tab_analysis:
           >
             🖨️ 대시보드 보고서 PDF 출력 / 인쇄
           </button>
+          {isSupabaseConfigured && session && (
+            <button
+              onClick={handleLogout}
+              className="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
+              title="로그아웃합니다."
+              id="logout_button"
+            >
+              🚪 로그아웃 ({session.user.email})
+            </button>
+          )}
         </div>
 
         {/* Sidebar Profiles & Home Info */}
@@ -1838,14 +1814,9 @@ with tab_analysis:
           <div className="space-y-2">
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Family profiles</span>
             <div className="bg-slate-800/40 p-3 rounded-xl border border-slate-700/50 space-y-2">
-              <div className="flex justify-between items-center text-xs text-slate-300">
-                <span className="flex items-center space-x-2">
-                  <User className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>최영범 (남편)</span>
-                </span>
-                <span className="text-emerald-400 font-bold bg-emerald-400/10 px-1.5 py-0.5 rounded text-[10px]">
-                  신용 {HUSBAND.creditScore}점
-                </span>
+              <div className="flex items-center space-x-2 text-xs text-slate-300">
+                <User className="w-3.5 h-3.5 text-emerald-400" />
+                <span>최영범 (남편)</span>
               </div>
               <div className="flex items-center space-x-2 text-xs text-slate-300">
                 <User className="w-3.5 h-3.5 text-pink-400" />
@@ -1915,19 +1886,6 @@ with tab_analysis:
             <TrendingUp className="w-4 h-4 text-emerald-400" />
             <span>📈 자산 및 부채</span>
           </button>
-
-          <button
-            onClick={() => setActiveTab("streamlit")}
-            className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-              activeTab === "streamlit"
-                ? "bg-slate-800 text-emerald-400 shadow-sm border border-emerald-500/30"
-                : "text-emerald-400 hover:bg-slate-800/40 hover:text-emerald-300"
-            }`}
-            id="nav_btn_streamlit"
-          >
-            <Code className="w-4 h-4 text-emerald-400" />
-            <span>💻 VS Code Streamlit Code</span>
-          </button>
         </nav>
 
         {/* Sidebar Footer */}
@@ -1959,16 +1917,7 @@ with tab_analysis:
               {activeTab === "ledger" && "💸 지출과 수입 (Interactive Ledger)"}
               {activeTab === "analysis" && "📊 재무적 지출 분석 (Financial Expense Analysis)"}
               {activeTab === "assets" && "📈 자산 및 부채 (Asset & Trend Analysis)"}
-              {activeTab === "streamlit" && "💻 Streamlit Python 소스 코드"}
             </h2>
-          </div>
-          
-          {/* Top Info Badges */}
-          <div className="flex items-center space-x-3 text-sm" id="top_info_badges">
-            <div className="bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100 flex items-center space-x-1 text-emerald-700 shadow-xs">
-              <span className="text-xs font-bold">{HUSBAND.name} 신용:</span>
-              <span className="font-mono font-black text-emerald-900 text-xs">{HUSBAND.creditScore}점</span>
-            </div>
           </div>
         </header>
 
@@ -2253,7 +2202,7 @@ with tab_analysis:
               </div>
 
               {/* KPI CARD STATS ROW */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6" id="kpi_cards_grid">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6" id="kpi_cards_grid">
                 
                 {/* Card 1: Total Assets */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_assets">
@@ -2308,20 +2257,6 @@ with tab_analysis:
                     </p>
                   </div>
                 </div>
-
-                {/* Card 4: Husband Credit */}
-                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_credit">
-                  <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">⭐️ 최영범 신용점수</span>
-                    <span className="bg-emerald-50 text-emerald-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">최상위 1등급</span>
-                  </div>
-                  <div className="mt-4">
-                    <span className="text-2xl font-black font-mono text-emerald-600 tracking-tight">
-                      {HUSBAND.creditScore}점
-                    </span>
-                    <p className="text-[11px] text-slate-400 mt-1">KB스타클럽 및 대출우대 조건 부합</p>
-                  </div>
-                </div>
               </div>
 
               {/* Warning Alert if netWorth is negative */}
@@ -2358,45 +2293,86 @@ with tab_analysis:
                     {/* Mission completion rate badge */}
                     <div className="text-right">
                       <span className="text-[10px] font-mono font-bold bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg text-slate-700">
-                        완료: {Object.values(checklist).filter(v => v).length}/{Object.keys(checklist).length}
+                        완료: {checklist.filter(c => c.done).length}/{checklist.length}
                       </span>
                     </div>
                   </div>
 
                   {/* Tasks List */}
                   <div className="space-y-3" id="checklist_items">
-                    {Object.keys(checklist).map((task) => (
-                      <label 
-                        key={task}
-                        className={`flex items-start space-x-3.5 p-4 rounded-2xl border transition-all cursor-pointer ${
-                          checklist[task]
-                            ? "bg-emerald-50/30 border-emerald-100 text-slate-400 line-through"
-                            : "bg-slate-50 border-slate-200 text-slate-800 hover:bg-slate-100/50"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checklist[task]}
-                          onChange={() => handleToggleChecklist(task)}
-                          className="w-4.5 h-4.5 rounded text-emerald-600 border-slate-300 accent-emerald-500 mt-0.5 shrink-0 cursor-pointer"
-                        />
-                        <div className="text-xs sm:text-sm font-semibold leading-normal">{task}</div>
-                      </label>
-                    ))}
+                    {checklist.length === 0 ? (
+                      <p className="text-xs text-slate-400 text-center py-6">체크리스트 항목이 없습니다. 아래에서 추가해 보세요.</p>
+                    ) : (
+                      checklist.map((item) => (
+                        <div
+                          key={item.id}
+                          className={`flex items-center space-x-3.5 p-4 rounded-2xl border transition-all ${
+                            item.done
+                              ? "bg-emerald-50/30 border-emerald-100 text-slate-400"
+                              : "bg-slate-50 border-slate-200 text-slate-800 hover:bg-slate-100/50"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={item.done}
+                            onChange={() => handleToggleChecklistItem(item.id)}
+                            className="w-4.5 h-4.5 rounded text-emerald-600 border-slate-300 accent-emerald-500 shrink-0 cursor-pointer"
+                          />
+                          <input
+                            type="text"
+                            value={item.label}
+                            onChange={(e) => handleChecklistLabelChange(item.id, e.target.value)}
+                            onBlur={() => handleChecklistLabelBlur(item.id)}
+                            className={`flex-1 min-w-0 bg-transparent text-xs sm:text-sm font-semibold leading-normal focus:outline-none focus:underline ${item.done ? "line-through" : ""}`}
+                          />
+                          <button
+                            onClick={() => handleDeleteChecklistItem(item.id)}
+                            className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-white transition-colors cursor-pointer shrink-0"
+                            title="항목 삭제"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))
+                    )}
                   </div>
+
+                  {/* Add new checklist item */}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const input = e.currentTarget.elements.namedItem("newChecklistLabel") as HTMLInputElement;
+                      handleAddChecklistItem(input.value);
+                      input.value = "";
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      name="newChecklistLabel"
+                      type="text"
+                      placeholder="새 체크리스트 항목 추가..."
+                      className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shrink-0 cursor-pointer"
+                    >
+                      추가
+                    </button>
+                  </form>
 
                   {/* Progress Bar */}
                   <div className="space-y-1.5 pt-2">
                     <div className="flex justify-between text-xs text-slate-500">
                       <span>미션 달성률</span>
                       <span className="font-bold text-slate-800">
-                        {Math.round((Object.values(checklist).filter(v => v).length / Object.keys(checklist).length) * 100)}%
+                        {checklist.length > 0 ? Math.round((checklist.filter(c => c.done).length / checklist.length) * 100) : 0}%
                       </span>
                     </div>
                     <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                      <div 
-                        className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500" 
-                        style={{ width: `${(Object.values(checklist).filter(v => v).length / Object.keys(checklist).length) * 100}%` }}
+                      <div
+                        className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
+                        style={{ width: `${checklist.length > 0 ? (checklist.filter(c => c.done).length / checklist.length) * 100 : 0}%` }}
                       ></div>
                     </div>
                   </div>
@@ -3766,85 +3742,147 @@ with tab_analysis:
 
               </div>
 
-
-            </div>
-          )}
-
-          {/* ==========================================
-              TAB 4: 💻 VS Code Streamlit (Code Viewer)
-             ========================================== */}
-          {activeTab === "streamlit" && (
-            <div className="space-y-8" id="streamlit_code_tab">
-              
-              <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4" id="streamlit_tab_header">
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                  <div>
-                    <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                      <Code className="w-5 h-5 text-emerald-600" />
-                      <span>💻 VS Code에서 바로 실행할 수 있는 Streamlit 소스 코드 (`app.py`)</span>
-                    </h3>
-                    <p className="text-xs text-slate-500">
-                      요청하신 금융 데이터와 UI 요건을 완벽하게 수록한 독립형 Streamlit Python 원본 소스입니다.
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={handleCopyCode}
-                    className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm px-4.5 py-2.5 rounded-xl transition-all flex items-center space-x-2 shrink-0 cursor-pointer shadow-sm"
-                  >
-                    {copiedCode ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-400" />
-                        <span>복사 완료!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4" />
-                        <span>전체 소스코드 복사</span>
-                      </>
-                    )}
-                  </button>
+              {/* 대출 상환 기록 (원리금균등/원금균등 방식 순차 재계산) */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-6" id="mortgage_payment_history_section">
+                <div className="border-b border-slate-100 pb-4">
+                  <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
+                    <CreditCard className="w-5 h-5 text-emerald-600" />
+                    <span>🏦 {LIABILITY_MORTGAGE.name} 상환 기록</span>
+                  </h4>
+                  <p className="text-xs text-slate-400">
+                    상환할 때마다 그 회차의 이자(남은 원금 × 월 이자율)를 먼저 계산하고, 나머지가 원금을 줄이는 방식으로 잔액과 누적 이자를 순차 재계산합니다.
+                  </p>
                 </div>
-                
-                {/* Local run instructions */}
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-[11px] sm:text-xs text-slate-600 leading-relaxed space-y-1.5" id="streamlit_instructions">
-                  <p className="font-bold text-slate-900 text-xs sm:text-sm">💡 내 컴퓨터(VS Code)에서 3초 만에 실행하는 법</p>
-                  <ol className="list-decimal pl-4 space-y-1">
-                    <li>프로젝트 루트 폴더에 생성되어 있는 <strong>app.py</strong> 파일을 그대로 다운로드하거나, 위 버튼을 눌러 전체 코드를 복사하세요.</li>
-                    <li>VS Code 터미널에서 Streamlit과 필수 라이브러리를 설치합니다: <code className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono">pip install streamlit pandas plotly</code></li>
-                    <li>설치가 끝나면 아래 명령어로 대시보드를 바로 구동합니다: <code className="bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded font-mono">streamlit run app.py</code></li>
-                    <li>웹 브라우저 창이 자동으로 열리며, 로컬 환경에서 부드럽게 연동되는 실시간 가계부 대시보드가 작동합니다!</li>
-                  </ol>
-                </div>
-              </div>
 
-              {/* Code Panel */}
-              <div className="bg-slate-900 text-slate-300 rounded-3xl overflow-hidden shadow-md border border-slate-800" id="code_viewer_panel">
-                <div className="bg-slate-800 border-b border-slate-700 px-4 py-2 flex justify-between items-center text-xs text-slate-400 font-mono">
-                  <span>app.py (Streamlit Finance Dashboard)</span>
-                  <span className="bg-slate-700 px-2 py-0.5 rounded text-white font-mono uppercase text-[10px]">python</span>
-                </div>
-                <div className="p-6 overflow-x-auto text-xs font-mono leading-relaxed max-h-[500px]" id="code_output">
-                  <pre className="text-emerald-400">
-{`# ------------------------------------------------------------------
-# 우리집 통합 재정 대시보드 - STREAMLIT APP CODE (VS CODE READY)
-# ------------------------------------------------------------------
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date
+                {(() => {
+                  const monthlyRate = (LIABILITY_MORTGAGE.rate / 100) / 12;
+                  let runningBalance = LIABILITY_MORTGAGE.amount;
+                  const rows = mortgagePayments.map(p => {
+                    const interest = runningBalance * monthlyRate;
+                    let principalPortion = p.amount - interest;
+                    if (principalPortion < 0) principalPortion = 0;
+                    if (principalPortion > runningBalance) principalPortion = runningBalance;
+                    runningBalance -= principalPortion;
+                    return { ...p, interest, principalPortion, balanceAfter: runningBalance };
+                  });
+                  const totalPrincipalPaid = rows.reduce((s, r) => s + r.principalPortion, 0);
+                  const totalInterestPaid = rows.reduce((s, r) => s + r.interest, 0);
+                  const remainingBalance = runningBalance;
 
-st.set_page_config(
-    page_title="우리집 통합 재정 대시보드",
-    page_icon="🏠",
-    layout="wide"
-)
+                  return (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="bg-rose-50/40 p-4 rounded-2xl border border-rose-100/30 text-center">
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">🏠 현재 남은 원금</span>
+                          <strong className="text-base sm:text-lg font-mono text-rose-700 block">{Math.round(remainingBalance).toLocaleString()}원</strong>
+                        </div>
+                        <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">💰 누적 원금 상환액</span>
+                          <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{Math.round(totalPrincipalPaid).toLocaleString()}원</strong>
+                        </div>
+                        <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">📉 누적 납부 이자</span>
+                          <strong className="text-base sm:text-lg font-mono text-amber-700 block">{Math.round(totalInterestPaid).toLocaleString()}원</strong>
+                        </div>
+                      </div>
 
-# ... (전체 코드는 이미 /app.py 파일로 프로젝트 최상단에 완전하게 저장되어 있습니다!)
-# ... (상단 우측의 [전체 소스코드 복사] 버튼을 누르면 언제든 즉시 클립보드에 복사할 수 있습니다.)`}
-                  </pre>
-                </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const form = e.currentTarget;
+                          const dateInput = form.elements.namedItem("paymentDate") as HTMLInputElement;
+                          const amountInput = form.elements.namedItem("paymentAmount") as HTMLInputElement;
+                          const memoInput = form.elements.namedItem("paymentMemo") as HTMLInputElement;
+                          handleAddMortgagePayment(dateInput.value, Number(amountInput.value), memoInput.value);
+                          amountInput.value = "";
+                          memoInput.value = "";
+                        }}
+                        className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end bg-slate-50 border border-slate-200 rounded-2xl p-4"
+                        id="mortgage_payment_form"
+                      >
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-slate-500 block">상환 날짜</label>
+                          <input
+                            name="paymentDate"
+                            type="date"
+                            required
+                            defaultValue={new Date().toISOString().substring(0, 10)}
+                            className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-slate-500 block">상환액 (원)</label>
+                          <input
+                            name="paymentAmount"
+                            type="number"
+                            required
+                            min="1"
+                            placeholder="2500000"
+                            className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs sm:text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-slate-500 block">메모 (선택)</label>
+                          <input
+                            name="paymentMemo"
+                            type="text"
+                            placeholder="정기 상환 / 중도상환 등"
+                            className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-4 py-2 rounded-lg transition-all cursor-pointer"
+                        >
+                          상환 기록 추가
+                        </button>
+                      </form>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs sm:text-sm" id="mortgage_payment_table">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-slate-500 text-left">
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">회차</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">날짜</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">상환액</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">이자</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">원금 상환분</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">상환 후 잔액</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">메모</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap"></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.length === 0 ? (
+                              <tr><td colSpan={8} className="text-center py-8 text-slate-400">아직 기록된 상환 내역이 없습니다.</td></tr>
+                            ) : (
+                              rows.map((r, i) => (
+                                <tr key={r.id} className="border-b border-slate-100">
+                                  <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{i + 1}회</td>
+                                  <td className="py-2 pr-3 font-mono text-slate-500 whitespace-nowrap">{r.paymentDate}</td>
+                                  <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{r.amount.toLocaleString()}원</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-amber-600 whitespace-nowrap">{Math.round(r.interest).toLocaleString()}원</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-emerald-600 whitespace-nowrap">{Math.round(r.principalPortion).toLocaleString()}원</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-rose-600 whitespace-nowrap">{Math.round(r.balanceAfter).toLocaleString()}원</td>
+                                  <td className="py-2 pr-3 text-slate-500">{r.memo || "-"}</td>
+                                  <td className="py-2 pr-3">
+                                    <button
+                                      onClick={() => handleDeleteMortgagePayment(r.id)}
+                                      className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                                      title="상환 기록 삭제"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
             </div>
