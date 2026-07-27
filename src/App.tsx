@@ -1054,6 +1054,10 @@ export default function App() {
     setSelectedMonth(formMonth);
   };
 
+  // API Key 입력창에 이 암구호를 넣으면, 개인 키 대신 서버(Vercel 서버리스 함수)에 보관된
+  // 가족 공용 마스터 키로 자동 전환된다. 진짜 키는 서버 환경변수에만 있고 브라우저로는 절대 내려오지 않는다.
+  const GEMINI_MASTER_PASSPHRASE = "최연준 최고";
+
   // Gemini 데이터 분석 챗봇: 업로드된 수입/지출·자산 데이터를 컨텍스트로 전달해 질문에 답한다.
   const handleSendChatMessage = async () => {
     const question = chatInput.trim();
@@ -1070,8 +1074,6 @@ export default function App() {
 
     setChatLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: trimmedKey });
-
       const ledgerContext = ledger.map(item => ({
         월: item.month,
         구분: item.type,
@@ -1099,15 +1101,29 @@ ${JSON.stringify(assetContext)}
 [질문]
 ${question}`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
-        contents: prompt
-      });
+      let answerText: string;
+      if (trimmedKey === GEMINI_MASTER_PASSPHRASE) {
+        const res = await fetch("/api/gemini-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "서버 요청 실패");
+        answerText = data.text || "응답을 생성하지 못했습니다.";
+      } else {
+        const ai = new GoogleGenAI({ apiKey: trimmedKey });
+        const response = await ai.models.generateContent({
+          model: "gemini-1.5-flash",
+          contents: prompt
+        });
+        answerText = response.text || "응답을 생성하지 못했습니다.";
+      }
 
-      setChatMessages(prev => [...prev, { role: "assistant", text: response.text || "응답을 생성하지 못했습니다." }]);
+      setChatMessages(prev => [...prev, { role: "assistant", text: answerText }]);
     } catch (error) {
       console.error(error);
-      setChatMessages(prev => [...prev, { role: "assistant", text: "⚠️ Gemini API 호출 중 오류가 발생했습니다. API Key가 올바른지 확인해 주세요." }]);
+      setChatMessages(prev => [...prev, { role: "assistant", text: "⚠️ Gemini API 호출 중 오류가 발생했습니다. API Key(또는 암구호)가 올바른지 확인해 주세요." }]);
     } finally {
       setChatLoading(false);
     }
@@ -2724,16 +2740,16 @@ ${question}`;
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-600 block">🔑 개인 Gemini API Key</label>
+                  <label className="text-xs font-bold text-slate-600 block">🔑 개인 Gemini API Key (또는 가족 암구호)</label>
                   <input
                     type="password"
                     value={geminiApiKey}
                     onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="AIzaSy..."
+                    placeholder="AIzaSy... 또는 암구호 입력"
                     className="bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-xs sm:text-sm w-full font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     id="gemini_api_key_input"
                   />
-                  <p className="text-[10px] text-slate-400">키는 이 브라우저에만 저장되며 외부 서버로 전송되지 않습니다. (Google AI Studio에서 발급)</p>
+                  <p className="text-[10px] text-slate-400">개인 키는 이 브라우저에만 저장되며 외부 서버로 전송되지 않습니다. (Google AI Studio에서 발급) 가족 암구호를 입력하면 서버에 등록된 공용 키로 자동 전환됩니다.</p>
                 </div>
 
                 <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-3 max-h-80 overflow-y-auto" id="gemini_chat_messages">
