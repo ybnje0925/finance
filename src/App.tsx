@@ -3536,7 +3536,7 @@ ${question}`;
                                 <div className="space-y-3" id="drilldown_category_trend">
                                   <h5 className="text-xs font-bold text-slate-600">📈 "{selectedCat}" 카테고리 최근 6개월 지출 추이</h5>
                                   <div className="overflow-x-auto">
-                                    <table className="w-full text-xs sm:text-sm">
+                                    <table className="w-full min-w-[480px] text-xs sm:text-sm">
                                       <thead>
                                         <tr className="border-b border-slate-200 text-slate-500 text-left">
                                           <th className="py-2 pr-3 font-bold whitespace-nowrap">월</th>
@@ -3584,15 +3584,15 @@ ${question}`;
                             })()}
 
                             <div className="overflow-x-auto">
-                              <table className="w-full text-xs sm:text-sm" id="drilldown_detail_table">
+                              <table className="w-full min-w-[640px] text-xs sm:text-sm" id="drilldown_detail_table">
                                 <thead>
                                   <tr className="border-b border-slate-200 text-slate-500 text-left">
                                     <th className="py-2 pr-3 font-bold whitespace-nowrap">날짜</th>
                                     <th className="py-2 pr-3 font-bold whitespace-nowrap">카테고리</th>
-                                    <th className="py-2 pr-3 font-bold">내용</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">내용</th>
                                     <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">금액</th>
                                     <th className="py-2 pr-3 font-bold whitespace-nowrap">결제수단</th>
-                                    <th className="py-2 pr-3 font-bold">메모</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">메모</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -3605,10 +3605,10 @@ ${question}`;
                                         <td className="py-2 pr-3 whitespace-nowrap">
                                           <span className="bg-rose-50 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-md">{item.category}</span>
                                         </td>
-                                        <td className="py-2 pr-3 font-semibold text-slate-800">{item.content}</td>
+                                        <td className="py-2 pr-3 font-semibold text-slate-800 whitespace-nowrap">{item.content}</td>
                                         <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{item.amount.toLocaleString()}원</td>
                                         <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{item.paymentMethod || "-"}</td>
-                                        <td className="py-2 pr-3 text-slate-500">{item.memo || "-"}</td>
+                                        <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{item.memo || "-"}</td>
                                       </tr>
                                     ))
                                   )}
