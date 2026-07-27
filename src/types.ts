@@ -14,6 +14,7 @@ export interface LedgerItem {
   date: string;
   memo?: string;
   paymentMethod?: string;
+  spender?: string;
 }
 
 export interface InvestmentItem {

@@ -13,8 +13,12 @@ create table if not exists ledger_items (
   date text not null,
   memo text not null default '',
   payment_method text not null default '',
+  spender text not null default '',
   updated_at timestamptz not null default now()
 );
+
+-- 기존에 이미 테이블을 만든 경우를 위한 안전한 컬럼 추가(이미 있으면 아무 일도 하지 않음)
+alter table ledger_items add column if not exists spender text not null default '';
 
 create table if not exists asset_free_items (
   id bigserial primary key,

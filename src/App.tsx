@@ -357,15 +357,16 @@ export default function App() {
         setLedger(ledgerRows.map((r: any) => ({
           id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
           amount: Number(r.amount), active: r.active, date: r.date,
-          memo: r.memo || "", paymentMethod: r.payment_method || ""
+          memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
         })));
       }
       if (freeRows.length > 0) {
-        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Number(r.amount) })));
+        // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
+        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
       }
       if (investRows.length > 0) {
         setInvestmentAssets(investRows.map((r: any) => ({
-          name: r.name, principal: Number(r.principal), appraised: Number(r.appraised), yieldRate: Number(r.yield_rate)
+          name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
         })));
       }
       if (checklistRows.length > 0) {
@@ -416,7 +417,7 @@ export default function App() {
     if (items.length > 0) {
       const { error: insError } = await supabase.from("ledger_items").insert(items.map(i => ({
         id: i.id, month: i.month, type: i.type, category: i.category, content: i.content,
-        amount: i.amount, active: i.active, date: i.date, memo: i.memo || "", payment_method: i.paymentMethod || ""
+        amount: i.amount, active: i.active, date: i.date, memo: i.memo || "", payment_method: i.paymentMethod || "", spender: i.spender || ""
       })));
       logSupabaseError("가계부 일괄 저장", insError);
       return !delError && !insError;
@@ -428,7 +429,7 @@ export default function App() {
     if (!supabase || !session) return;
     const { error } = await supabase.from("ledger_items").upsert({
       id: item.id, month: item.month, type: item.type, category: item.category, content: item.content,
-      amount: item.amount, active: item.active, date: item.date, memo: item.memo || "", payment_method: item.paymentMethod || ""
+      amount: item.amount, active: item.active, date: item.date, memo: item.memo || "", payment_method: item.paymentMethod || "", spender: item.spender || ""
     });
     logSupabaseError("가계부 항목 저장", error);
   };
@@ -502,6 +503,7 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState<string>("2026-07");
   const [isMultiMonth, setIsMultiMonth] = useState<boolean>(false);
   const [selectedMonths, setSelectedMonths] = useState<string[]>(["2026-07"]);
+  const [ledgerSortMode, setLedgerSortMode] = useState<"date" | "spender">("date");
 
   // 자산 변동 추이 비교 월 (3번: 자산 탭에서 비교할 월들을 직접 선택)
   const [assetCompareMonths, setAssetCompareMonths] = useState<string[]>([]);
@@ -689,6 +691,35 @@ export default function App() {
       ...prev,
       [key]: !prev[key]
     }));
+  };
+
+  // 계좌 명의: 계좌명 맨 앞의 "[영범] " 같은 태그로 저장/파싱한다 (다중 시트 업로드 때와 동일한 방식).
+  const ASSET_OWNER_OPTIONS = ["미지정", "영범", "재은", "공동"];
+  const parseAssetOwner = (name: string) => name.match(/^\[(.+?)\]\s*/)?.[1] || "미지정";
+  const stripAssetOwnerTag = (name: string) => name.replace(/^\[.+?\]\s*/, "");
+
+  const handleSetFreeAssetOwner = (index: number, owner: string) => {
+    setFreeAssets(prev => {
+      const next = prev.map((a, i) => {
+        if (i !== index) return a;
+        const baseName = stripAssetOwnerTag(a.name);
+        return { ...a, name: owner === "미지정" ? baseName : `[${owner}] ${baseName}` };
+      });
+      syncAssetsReplaceToSupabase(next, investmentAssets);
+      return next;
+    });
+  };
+
+  const handleSetInvestmentAssetOwner = (index: number, owner: string) => {
+    setInvestmentAssets(prev => {
+      const next = prev.map((a, i) => {
+        if (i !== index) return a;
+        const baseName = stripAssetOwnerTag(a.name);
+        return { ...a, name: owner === "미지정" ? baseName : `[${owner}] ${baseName}` };
+      });
+      syncAssetsReplaceToSupabase(freeAssets, next);
+      return next;
+    });
   };
 
   const toggleAssetCompareMonth = (m: string) => {
@@ -1391,7 +1422,8 @@ ${question}`;
 
                     if (typeof nameCell === "string" && nameCell.trim().length > 0 && typeof amountCell === "number") {
                       const name = ownerTag + nameCell.trim();
-                      const amount = Math.abs(amountCell);
+                      // 원 단위는 소수점이 없어야 하므로(은행 export의 반올림 잔여값 등으로 소수점이 붙는 경우가 있음) 정수로 반올림한다.
+                      const amount = Math.round(Math.abs(amountCell));
 
                       if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
                         if (!newFree.some(f => f.name === name)) {
@@ -1450,7 +1482,7 @@ ${question}`;
                     const yieldRate = typeof rawYield === "number"
                       ? Math.round(rawYield * 100) / 100
                       : (principalVal !== 0 ? Math.round(((appraisedVal - principalVal) / principalVal) * 10000) / 100 : 0);
-                    investMap.set(name, { name, principal: Math.abs(principalVal), appraised: Math.abs(appraisedVal), yieldRate });
+                    investMap.set(name, { name, principal: Math.round(Math.abs(principalVal)), appraised: Math.round(Math.abs(appraisedVal)), yieldRate });
                   }
                 }
                 break;
@@ -1524,7 +1556,7 @@ ${question}`;
                 let amount = 0;
                 if (rawAmount !== undefined) {
                   if (typeof rawAmount === "number") {
-                    amount = rawAmount;
+                    amount = Math.round(rawAmount);
                   } else {
                     amount = parseInt(String(rawAmount).replace(/[^0-9-]/g, "")) || 0;
                   }
@@ -1647,6 +1679,22 @@ ${question}`;
   const handleDeleteItem = (id: number) => {
     setLedger(prev => prev.filter(item => item.id !== id));
     deleteLedgerItemFromSupabase(id);
+  };
+
+  // 지출 내역을 날짜순(있는 그대로) 또는 지출자별로 묶어서 보여준다.
+  const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
+    if (ledgerSortMode === "date") {
+      return [{ label: null, items }];
+    }
+    const groups = new Map<string, LedgerItem[]>();
+    items.forEach(item => {
+      const key = (item.spender || "").trim() || "미지정";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    });
+    return Array.from(groups.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([label, groupItems]) => ({ label, items: groupItems }));
   };
 
   // 체크리스트: 추가/토글/수정/삭제 (Supabase에 저장되어 재접속·다른 기기에서도 유지됨)
@@ -2846,9 +2894,32 @@ ${question}`;
                 </div>
               </div>
 
+              {/* 정렬 기준 선택: 날짜순 vs 지출자별 */}
+              <div className="flex items-center gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3" id="ledger_sort_mode_toggle">
+                <span className="text-xs font-bold text-slate-600">정렬 기준:</span>
+                <button
+                  type="button"
+                  onClick={() => setLedgerSortMode("date")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    ledgerSortMode === "date" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                  }`}
+                >
+                  날짜순
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLedgerSortMode("spender")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    ledgerSortMode === "spender" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                  }`}
+                >
+                  지출자별
+                </button>
+              </div>
+
               {/* TWO LEDGER COLUMNS FOR INCOME AND EXPENSES */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8" id="ledger_tables_grid">
-                
+
                 {/* Left Column: Incomes */}
                 <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4" id="ledger_incomes_column">
                   <div className="flex justify-between items-center border-b border-slate-100 pb-3">
@@ -2861,74 +2932,96 @@ ${question}`;
                     </span>
                   </div>
 
-                  <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2" id="income_items_list">
+                  <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="income_items_list">
                     {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입").length === 0 ? (
                        <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 수입 내역이 없습니다.</div>
                     ) : (
-                      ledger
-                        .filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입")
-                        .map((item) => (
-                          <div 
-                            key={item.id}
-                            className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
-                              item.active 
-                                ? "bg-white border-slate-200 shadow-xs" 
-                                : "bg-slate-50/70 border-slate-100 text-slate-400 opacity-60"
-                            }`}
-                          >
-                            <div className="flex items-center space-x-3 min-w-0">
-                              <button
-                                type="button"
-                                onClick={() => handleToggleItem(item.id)}
-                                className={`px-2 py-1 rounded-full text-[10px] font-black transition-all border shrink-0 cursor-pointer ${
-                                  item.active
-                                    ? "bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400 shadow-xs"
-                                    : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
-                                }`}
-                                title="클릭 시 가계 연산 반영 여부 전환"
-                              >
-                                {item.active ? "반영" : "제외"}
-                              </button>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="bg-emerald-50 text-emerald-700 text-[9px] font-bold px-2 py-0.5 rounded-md inline-block">
-                                    {item.category}
-                                  </span>
-                                  {item.date && (
-                                    <span className="bg-slate-100 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 rounded-md inline-block font-mono">
-                                      {formatDateLabel(item.date)}
-                                    </span>
-                                  )}
+                      groupLedgerItemsForDisplay(
+                        ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입")
+                      ).map((group, gi) => (
+                        <div key={group.label ?? `date-${gi}`} className="space-y-2">
+                          {group.label && (
+                            <div className="text-[10px] font-black text-emerald-700 uppercase tracking-wider bg-emerald-50/60 rounded-lg px-2 py-1">
+                              👤 {group.label} ({group.items.length}건)
+                            </div>
+                          )}
+                          {group.items.map((item, itemIdx) => (
+                            <div
+                              key={`${item.id}-${gi}-${itemIdx}`}
+                              className={`p-3 rounded-xl border transition-all ${
+                                item.active
+                                  ? "bg-white border-slate-200 shadow-xs"
+                                  : "bg-slate-50/70 border-slate-100 text-slate-400 opacity-60"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleItem(item.id)}
+                                    className={`px-2 py-1 rounded-full text-[10px] font-black transition-all border shrink-0 cursor-pointer ${
+                                      item.active
+                                        ? "bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400 shadow-xs"
+                                        : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
+                                    }`}
+                                    title="클릭 시 가계 연산 반영 여부 전환"
+                                  >
+                                    {item.active ? "반영" : "제외"}
+                                  </button>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="bg-emerald-50 text-emerald-700 text-[9px] font-bold px-2 py-0.5 rounded-md inline-block">
+                                        {item.category}
+                                      </span>
+                                      {item.date && (
+                                        <span className="bg-slate-100 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 rounded-md inline-block font-mono">
+                                          {formatDateLabel(item.date)}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs sm:text-sm font-bold text-slate-900 truncate mt-1 max-w-[160px] sm:max-w-[220px]">{item.content}</p>
+                                  </div>
                                 </div>
-                                <p className="text-xs sm:text-sm font-bold text-slate-900 truncate mt-1">{item.content}</p>
+                                <span className="font-mono text-xs sm:text-sm font-bold text-emerald-600 shrink-0">
+                                  +{item.amount.toLocaleString()}원
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2 flex-wrap mt-2">
+                                <input
+                                  type="text"
+                                  placeholder="메모 추가..."
+                                  value={item.memo || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
+                                  }}
+                                  className="flex-1 min-w-[90px] bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate font-sans"
+                                  title="개별 거래 메모 (자동 저장)"
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="지출자..."
+                                  value={item.spender || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLedger(prev => prev.map(x => x.id === item.id ? { ...x, spender: val } : x));
+                                  }}
+                                  className="w-20 shrink-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate font-sans"
+                                  title="지출자 (예: 영범, 재은)"
+                                />
+                                <button
+                                  onClick={() => handleDeleteItem(item.id)}
+                                  className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+                                  title="내역 삭제"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
                             </div>
-                            
-                            <div className="flex items-center space-x-3 shrink-0">
-                              <input
-                                type="text"
-                                placeholder="메모 추가..."
-                                value={item.memo || ""}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
-                                }}
-                                className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 max-w-[100px] sm:max-w-[140px] truncate font-sans"
-                                title="개별 거래 메모 (자동 저장)"
-                              />
-                              <span className="font-mono text-xs sm:text-sm font-bold text-emerald-600">
-                                +{item.amount.toLocaleString()}원
-                              </span>
-                              <button
-                                onClick={() => handleDeleteItem(item.id)}
-                                className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                                title="내역 삭제"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                        ))
+                          ))}
+                        </div>
+                      ))
                     )}
                   </div>
                 </div>
@@ -2945,74 +3038,96 @@ ${question}`;
                     </span>
                   </div>
 
-                  <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2" id="expense_items_list">
+                  <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="expense_items_list">
                     {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출").length === 0 ? (
                       <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 지출 내역이 없습니다.</div>
                     ) : (
-                      ledger
-                        .filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출")
-                        .map((item) => (
-                          <div 
-                            key={item.id}
-                            className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
-                              item.active 
-                                ? "bg-white border-slate-200 shadow-xs" 
-                                : "bg-slate-50/70 border-slate-100 text-slate-400 opacity-60"
-                            }`}
-                          >
-                            <div className="flex items-center space-x-3 min-w-0">
-                              <button
-                                type="button"
-                                onClick={() => handleToggleItem(item.id)}
-                                className={`px-2 py-1 rounded-full text-[10px] font-black transition-all border shrink-0 cursor-pointer ${
-                                  item.active
-                                    ? "bg-rose-500 hover:bg-rose-600 text-white border-rose-400 shadow-xs"
-                                    : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
-                                }`}
-                                title="클릭 시 가계 연산 반영 여부 전환"
-                              >
-                                {item.active ? "반영" : "제외"}
-                              </button>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="bg-rose-50 text-rose-700 text-[9px] font-bold px-2 py-0.5 rounded-md inline-block">
-                                    {item.category}
-                                  </span>
-                                  {item.date && (
-                                    <span className="bg-slate-100 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 rounded-md inline-block font-mono">
-                                      {formatDateLabel(item.date)}
-                                    </span>
-                                  )}
+                      groupLedgerItemsForDisplay(
+                        ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출")
+                      ).map((group, gi) => (
+                        <div key={group.label ?? `date-${gi}`} className="space-y-2">
+                          {group.label && (
+                            <div className="text-[10px] font-black text-rose-700 uppercase tracking-wider bg-rose-50/60 rounded-lg px-2 py-1">
+                              👤 {group.label} ({group.items.length}건)
+                            </div>
+                          )}
+                          {group.items.map((item, itemIdx) => (
+                            <div
+                              key={`${item.id}-${gi}-${itemIdx}`}
+                              className={`p-3 rounded-xl border transition-all ${
+                                item.active
+                                  ? "bg-white border-slate-200 shadow-xs"
+                                  : "bg-slate-50/70 border-slate-100 text-slate-400 opacity-60"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleItem(item.id)}
+                                    className={`px-2 py-1 rounded-full text-[10px] font-black transition-all border shrink-0 cursor-pointer ${
+                                      item.active
+                                        ? "bg-rose-500 hover:bg-rose-600 text-white border-rose-400 shadow-xs"
+                                        : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
+                                    }`}
+                                    title="클릭 시 가계 연산 반영 여부 전환"
+                                  >
+                                    {item.active ? "반영" : "제외"}
+                                  </button>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="bg-rose-50 text-rose-700 text-[9px] font-bold px-2 py-0.5 rounded-md inline-block">
+                                        {item.category}
+                                      </span>
+                                      {item.date && (
+                                        <span className="bg-slate-100 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 rounded-md inline-block font-mono">
+                                          {formatDateLabel(item.date)}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs sm:text-sm font-bold text-slate-900 truncate mt-1 max-w-[160px] sm:max-w-[220px]">{item.content}</p>
+                                  </div>
                                 </div>
-                                <p className="text-xs sm:text-sm font-bold text-slate-900 truncate mt-1">{item.content}</p>
+                                <span className="font-mono text-xs sm:text-sm font-bold text-slate-900 shrink-0">
+                                  {item.amount < 0 ? "+" : "-"}{Math.abs(item.amount).toLocaleString()}원
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2 flex-wrap mt-2">
+                                <input
+                                  type="text"
+                                  placeholder="메모 추가..."
+                                  value={item.memo || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
+                                  }}
+                                  className="flex-1 min-w-[90px] bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate font-sans"
+                                  title="개별 거래 메모 (자동 저장)"
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="지출자..."
+                                  value={item.spender || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLedger(prev => prev.map(x => x.id === item.id ? { ...x, spender: val } : x));
+                                  }}
+                                  className="w-20 shrink-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate font-sans"
+                                  title="지출자 (예: 영범, 재은)"
+                                />
+                                <button
+                                  onClick={() => handleDeleteItem(item.id)}
+                                  className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+                                  title="내역 삭제"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
                             </div>
-                            
-                            <div className="flex items-center space-x-3 shrink-0">
-                              <input
-                                type="text"
-                                placeholder="메모 추가..."
-                                value={item.memo || ""}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
-                                }}
-                                className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 max-w-[100px] sm:max-w-[140px] truncate font-sans"
-                                title="개별 거래 메모 (자동 저장)"
-                              />
-                              <span className="font-mono text-xs sm:text-sm font-bold text-slate-900">
-                                {item.amount < 0 ? "+" : "-"}{Math.abs(item.amount).toLocaleString()}원
-                              </span>
-                              <button
-                                onClick={() => handleDeleteItem(item.id)}
-                                className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                                title="내역 삭제"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                        ))
+                          ))}
+                        </div>
+                      ))
                     )}
                   </div>
                 </div>
@@ -3479,8 +3594,8 @@ ${question}`;
                                   {filteredItems.length === 0 ? (
                                     <tr><td colSpan={6} className="text-center py-8 text-slate-400">해당 조건의 지출 내역이 없습니다.</td></tr>
                                   ) : (
-                                    filteredItems.map(item => (
-                                      <tr key={item.id} className="border-b border-slate-100">
+                                    filteredItems.map((item, itemIdx) => (
+                                      <tr key={`${item.id}-${itemIdx}`} className="border-b border-slate-100">
                                         <td className="py-2 pr-3 font-mono text-slate-500 whitespace-nowrap">{formatDateLabel(item.date)}</td>
                                         <td className="py-2 pr-3 whitespace-nowrap">
                                           <span className="bg-rose-50 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-md">{item.category}</span>
@@ -3607,11 +3722,23 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.free && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-36 overflow-y-auto font-mono">
-                            {freeAssets.map(acc => (
-                              <div key={acc.name} className="flex justify-between items-center">
-                                <span className="truncate max-w-[130px]" title={acc.name}>{acc.name}</span>
-                                <span>{acc.amount.toLocaleString()}원</span>
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
+                            {freeAssets.map((acc, idx) => (
+                              <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
+                                <div className="flex justify-between items-center gap-2">
+                                  <span className="truncate max-w-[130px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                  <span className="shrink-0">{acc.amount.toLocaleString()}원</span>
+                                </div>
+                                <select
+                                  value={parseAssetOwner(acc.name)}
+                                  onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
+                                  className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                  title="계좌 명의 지정"
+                                >
+                                  {ASSET_OWNER_OPTIONS.map(o => (
+                                    <option key={o} value={o} className="text-slate-900">{o}</option>
+                                  ))}
+                                </select>
                               </div>
                             ))}
                           </div>
@@ -3633,20 +3760,32 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.investment && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-36 overflow-y-auto font-mono">
-                            {investmentAssets.map(acc => {
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
+                            {investmentAssets.map((acc, idx) => {
                               const isStock = acc.yieldRate !== 0;
                               return (
-                                <div key={acc.name} className="flex justify-between items-center">
-                                  <span className="truncate max-w-[110px]" title={acc.name}>{acc.name}</span>
-                                  <div className="text-right">
-                                    <span>{acc.appraised.toLocaleString()}원</span>
-                                    {isStock && (
-                                      <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                        ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
-                                      </span>
-                                    )}
+                                <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
+                                  <div className="flex justify-between items-center gap-2">
+                                    <span className="truncate max-w-[110px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                    <div className="text-right shrink-0">
+                                      <span>{acc.appraised.toLocaleString()}원</span>
+                                      {isStock && (
+                                        <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                          ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
+                                  <select
+                                    value={parseAssetOwner(acc.name)}
+                                    onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
+                                    className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                    title="계좌 명의 지정"
+                                  >
+                                    {ASSET_OWNER_OPTIONS.map(o => (
+                                      <option key={o} value={o} className="text-slate-900">{o}</option>
+                                    ))}
+                                  </select>
                                 </div>
                               );
                             })}
