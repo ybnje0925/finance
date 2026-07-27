@@ -1126,6 +1126,10 @@ ${question}`;
 
         const allParsedLedgerItems: LedgerItem[] = [];
         let anySheetParsed = false;
+        // 시트가 여러 개(예: 영범/재은)일 때 각 시트의 행 인덱스가 0부터 다시 시작되므로
+        // "Date.now() + 행 인덱스"만으로는 서로 다른 시트의 같은 행 번호끼리 id가 충돌한다.
+        // 업로드 전체에서 절대 겹치지 않도록 전역 카운터를 별도로 둔다.
+        let globalRowCounter = 0;
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
@@ -1266,7 +1270,7 @@ ${question}`;
               const paymentMethod = rawPaymentMethod !== undefined && rawPaymentMethod !== null ? String(rawPaymentMethod).trim() : "";
 
               parsedItems.push({
-                id: Date.now() + r,
+                id: Date.now() + globalRowCounter++,
                 month: monthStr,
                 type,
                 category,
