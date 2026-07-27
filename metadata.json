@@ -1,6 +1,6 @@
 {
   "name": "우리집 통합 재정 대시보드",
-  "description": "최영범·강재은 부부의 하남시 감이동 한라비발디 입주 기념 통합 재정 대시보드 및 지출/수입 시뮬레이터",
+  "description": "최영범·강재은 부부의 통합 재정 대시보드 및 지출/수입 시뮬레이터",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

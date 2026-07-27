@@ -17,8 +17,6 @@ export const WIFE = {
   birthYear: 1989,
 };
 
-export const LOCATION = "경기도 하남시 감이동 한라비발디";
-
 // 자유입출금 자산
 export const ASSET_FREE_DEPOSITS: { name: string; amount: number }[] = [];
 

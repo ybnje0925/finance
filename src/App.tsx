@@ -32,11 +32,10 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment } from "./types";
 import { 
-  MOVE_IN_DATE, 
-  HUSBAND, 
-  WIFE, 
-  LOCATION, 
-  ASSET_FREE_DEPOSITS, 
+  MOVE_IN_DATE,
+  HUSBAND,
+  WIFE,
+  ASSET_FREE_DEPOSITS,
   ASSET_SAVINGS, 
   ASSET_ELECTRONIC, 
   ASSET_INVESTMENTS, 
@@ -925,7 +924,7 @@ export default function App() {
     let foodGuidance = "건강하고 균형잡힌 가계 소비 흐름을 이어가고 있습니다.";
     if (foodRatio > 25) {
       foodStatus = "식비 비중 다소 높음 (주의)";
-      foodGuidance = "이마트 장보기 및 외식 횟수가 증가했습니다. 비필수 식자재 공동구매나 감이동 로컬 마트 특가를 활용해 지출을 5% 이상 억제해 보세요.";
+      foodGuidance = "이마트 장보기 및 외식 횟수가 증가했습니다. 비필수 식자재 공동구매나 동네 로컬 마트 특가를 활용해 지출을 5% 이상 억제해 보세요.";
     } else if (foodRatio < 10 && foodCost > 0) {
       foodStatus = "식비 극단적 절약 중";
       foodGuidance = "가계 다이어트가 훌륭하나, 신혼 부부의 영양 균형과 생활 만족도를 위해 지나친 외식 통제보다는 계획적 지출을 권장합니다.";
@@ -1088,7 +1087,7 @@ export default function App() {
         가계총자산: totalAssets
       };
 
-      const prompt = `당신은 '${LOCATION}'에 거주하는 ${HUSBAND.name}·${WIFE.name} 부부의 가계부 데이터 분석 비서입니다.
+      const prompt = `당신은 ${HUSBAND.name}·${WIFE.name} 부부의 가계부 데이터 분석 비서입니다.
 아래는 이 가계의 실제 수입/지출 내역(JSON)과 자산 요약(JSON)입니다. 오직 이 데이터를 근거로 사용자의 질문에 한국어로 간결하고 정확하게 답변하세요. 금액은 천 단위 콤마와 "원" 단위로 표기하세요.
 
 [수입/지출 내역]
@@ -1153,6 +1152,9 @@ ${question}`;
           }
 
           const isLedgerSheetName = wsname.includes("내역") || wsname.includes("가계부") || wsname.includes("ledger");
+          // 시트 이름이 "가계부 내역" 같은 일반 명칭이 아니라 "영범"/"재은"처럼 사람 이름을 딴 시트라면,
+          // 그 시트에서 나온 모든 내역의 지출자를 해당 시트 이름으로 자동 지정한다.
+          const sheetSpenderTag = isLedgerSheetName ? "" : wsname.trim();
 
           if (headerRowIdx !== -1 || isLedgerSheetName) {
             const finalHeaderRowIdx = headerRowIdx !== -1 ? headerRowIdx : 0;
@@ -1273,7 +1275,8 @@ ${question}`;
                 active: true,
                 date: dateStr,
                 memo,
-                paymentMethod
+                paymentMethod,
+                spender: sheetSpenderTag
               });
             }
 
@@ -1968,7 +1971,7 @@ ${question}`;
             <Home className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight">🏡 감이동 비발디</h1>
+            <h1 className="text-lg font-bold tracking-tight">🏡 연준이네 가계부</h1>
             <p className="text-xs text-slate-400">우리집 통합 재정 대시보드</p>
           </div>
         </div>
@@ -2221,7 +2224,7 @@ ${question}`;
                         <span>[이달의 재무 브리핑] - {selectedMonth.replace("-", "년 ")}월 지출 분석 및 진단</span>
                       </h3>
                       <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                        감이동 비발디 가계의 실시간 자산 흐름과 당월 지출 구조를 종합 분석한 AI 스마트 요약 리포트입니다.
+                        우리 가계의 실시간 자산 흐름과 당월 지출 구조를 종합 분석한 AI 스마트 요약 리포트입니다.
                       </p>
                     </div>
 
@@ -2329,21 +2332,19 @@ ${question}`;
                           const numAmt = amt as number;
                           const percent = activeIncomeTotal > 0 ? Math.round((numAmt / activeIncomeTotal) * 100) : 0;
                           return (
-                            <div key={category} className="space-y-1">
-                              <div className="flex justify-between items-center text-xs font-semibold text-slate-700">
-                                <div className="flex items-center gap-2 flex-1 min-w-0 mr-2">
-                                  <span className="shrink-0">{category}</span>
-                                  <input
-                                    type="text"
-                                    placeholder="직접 메모 입력..."
-                                    value={categoryMemos[selectedMonth]?.[category] || ""}
-                                    onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
-                                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-0.5 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 max-w-[150px] truncate"
-                                    title="대분류 메모 (자동 저장)"
-                                  />
-                                </div>
+                            <div key={category} className="space-y-1.5">
+                              <div className="flex justify-between items-center gap-2 flex-wrap text-xs font-semibold text-slate-700">
+                                <span className="truncate">{category}</span>
                                 <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}원 ({percent}%)</span>
                               </div>
+                              <input
+                                type="text"
+                                placeholder="직접 메모 입력..."
+                                value={categoryMemos[selectedMonth]?.[category] || ""}
+                                onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate"
+                                title="대분류 메모 (자동 저장)"
+                              />
                               <div className="w-full bg-slate-100/70 rounded-full h-2 overflow-hidden">
                                 <div className="bg-emerald-500 h-2 rounded-full" style={{ width: `${percent}%` }}></div>
                               </div>
@@ -2414,9 +2415,9 @@ ${question}`;
                           const percent = activeExpenseTotal > 0 ? Math.round((numAmt / activeExpenseTotal) * 100) : 0;
                           const catType = getCategoryType(category);
                           return (
-                            <div key={category} className="space-y-1 bg-slate-50/50 p-2.5 rounded-xl border border-slate-100">
-                              <div className="flex justify-between items-center text-xs font-semibold text-slate-700">
-                                <div className="flex items-center gap-2 flex-1 min-w-0 mr-2">
+                            <div key={category} className="space-y-1.5 bg-slate-50/50 p-2.5 rounded-xl border border-slate-100">
+                              <div className="flex justify-between items-center gap-2 flex-wrap text-xs font-semibold text-slate-700">
+                                <div className="flex items-center gap-2 min-w-0">
                                   <button
                                     onClick={() => toggleCategoryType(category)}
                                     className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
@@ -2428,18 +2429,18 @@ ${question}`;
                                   >
                                     [{catType}]
                                   </button>
-                                  <span className="shrink-0 font-bold text-slate-900">{category}</span>
-                                  <input
-                                    type="text"
-                                    placeholder="직접 메모 입력..."
-                                    value={categoryMemos[selectedMonth]?.[category] || ""}
-                                    onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
-                                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-0.5 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 max-w-[150px] truncate"
-                                    title="대분류 메모 (자동 저장)"
-                                  />
+                                  <span className="font-bold text-slate-900 truncate">{category}</span>
                                 </div>
                                 <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}원 ({percent}%)</span>
                               </div>
+                              <input
+                                type="text"
+                                placeholder="직접 메모 입력..."
+                                value={categoryMemos[selectedMonth]?.[category] || ""}
+                                onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate"
+                                title="대분류 메모 (자동 저장)"
+                              />
                               <div className="w-full bg-slate-100/70 rounded-full h-2 overflow-hidden">
                                 <div className={`h-2 rounded-full ${catType === "고정비" ? "bg-indigo-500" : "bg-orange-500"}`} style={{ width: `${percent}%` }}></div>
                               </div>
@@ -2546,7 +2547,7 @@ ${question}`;
                       현재 우리 가계는 총 부채(<span className="font-mono font-semibold">{totalLiabilities.toLocaleString()}원</span>)가 
                       통합 금융 자산(<span className="font-mono font-semibold">{totalAssets.toLocaleString()}원</span>)을 초과하여 
                       순금융자산이 <span className="font-mono font-bold text-rose-700">{netWorth.toLocaleString()}원</span>으로 마이너스 상태입니다. 
-                      이는 감이동 한라비발디 주택 구매를 위한 장기 주택담보대출 실행에 따른 자연스러운 상태입니다. 
+                      이는 내 집 마련을 위한 장기 주택담보대출 실행에 따른 자연스러운 상태입니다.
                       향후 <strong>지출과 수입 탭</strong> 및 <strong>자산 및 부채 탭</strong>의 상환 시뮬레이션을 통해 주기적인 계획을 설계하세요.
                     </p>
                   </div>
@@ -2663,7 +2664,7 @@ ${question}`;
                         <CreditCard className="w-5 h-5 text-emerald-600" />
                         <span>🏦 NH 주택담보대출 스펙</span>
                       </h4>
-                      <p className="text-[11px] text-slate-400">농협은행 한라비발디 주택 구입 자금 대출 정보</p>
+                      <p className="text-[11px] text-slate-400">농협은행 주택 구입 자금 대출 정보</p>
                     </div>
 
                     <div className="space-y-3 text-xs sm:text-sm" id="mortgage_specs">
@@ -3723,7 +3724,10 @@ ${question}`;
                         </div>
                         {expandedAssets.free && (
                           <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {freeAssets.map((acc, idx) => (
+                            {freeAssets
+                              .map((acc, idx) => ({ acc, idx }))
+                              .sort((a, b) => b.acc.amount - a.acc.amount)
+                              .map(({ acc, idx }) => (
                               <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
                                 <div className="flex justify-between items-center gap-2">
                                   <span className="truncate max-w-[130px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
@@ -3761,7 +3765,10 @@ ${question}`;
                         </div>
                         {expandedAssets.investment && (
                           <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {investmentAssets.map((acc, idx) => {
+                            {investmentAssets
+                              .map((acc, idx) => ({ acc, idx }))
+                              .sort((a, b) => b.acc.appraised - a.acc.appraised)
+                              .map(({ acc, idx }) => {
                               const isStock = acc.yieldRate !== 0;
                               return (
                                 <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
@@ -4260,7 +4267,7 @@ ${question}`;
 
         {/* --- GLOBAL APP FOOTER --- */}
         <footer className="bg-white border-t border-slate-200 px-8 py-6 text-center text-[11px] sm:text-xs text-slate-400" id="global_footer">
-          <p className="font-medium">© 2026 최영범·강재은 한라비발디 통합 재정 대시보드. All Rights Reserved.</p>
+          <p className="font-medium">© 2026 최영범·강재은 통합 재정 대시보드. All Rights Reserved.</p>
           <p className="text-[10px] text-slate-300 mt-1">Designed with precision in Google AI Studio • Professional Polish Theme</p>
         </footer>
 
