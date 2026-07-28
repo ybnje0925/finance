@@ -9,9 +9,8 @@ import {
   DollarSign, 
   TrendingUp, 
   CheckSquare, 
-  CreditCard, 
-  PlusCircle, 
-  Trash2, 
+  CreditCard,
+  Trash2,
   Percent, 
   ArrowRight, 
   MapPin,
@@ -748,24 +747,6 @@ export default function App() {
     }
   }, [ledger, uniqueMonths, selectedMonth]);
 
-  // New item form state
-  const [formMonth, setFormMonth] = useState("2026-07");
-  const [formDate, setFormDate] = useState("2026-07-16");
-  const [formType, setFormType] = useState<"수입" | "지출">("지출");
-  const [formCategory, setFormCategory] = useState("식비");
-  const [formContent, setFormContent] = useState("");
-  const [formAmount, setFormAmount] = useState<number>(100000);
-
-  useEffect(() => {
-    setFormDate(prev => {
-      const parts = prev.split("-");
-      if (parts.length === 3) {
-        return `${formMonth}-${parts[2]}`;
-      }
-      return `${formMonth}-15`;
-    });
-  }, [formMonth]);
-
   // --- 3. GENERAL METRICS CALCULATION ---
   // Financial aggregates
   const totalFree = freeAssets.reduce((sum, item) => sum + item.amount, 0);
@@ -781,6 +762,9 @@ export default function App() {
   const totalAssetAndLike = cashAndLike + totalInvestment;
   const cashPercent = totalAssetAndLike > 0 ? Math.round((cashAndLike / totalAssetAndLike) * 1000) / 10 : 84.8;
   const investPercent = totalAssetAndLike > 0 ? Math.round((totalInvestment / totalAssetAndLike) * 1000) / 10 : 15.2;
+  const bestInvestment = investmentAssets.length > 0
+    ? investmentAssets.reduce((best, item) => (item.yieldRate > best.yieldRate ? item : best), investmentAssets[0])
+    : null;
 
   // Active ledger items for calculation
   const getMonthlyIncomes = (m: string) => {
@@ -1002,12 +986,12 @@ export default function App() {
             </h4>
             <div className="space-y-3 text-xs leading-relaxed text-slate-300">
               <p>
-                현재 가계 자산의 <span className="text-red-300 font-bold">84.8%가 예적금 및 현금성 자산</span>에 과도하게 치우쳐 있습니다. 저금리 현금 유치는 대출 금리보다 실질 수익률이 낮아 장기적으로 자산 가치가 잠식됩니다.
+                현재 가계 자산의 <span className="text-red-300 font-bold">{cashPercent}%가 예적금 및 현금성 자산</span>에 과도하게 치우쳐 있습니다. 저금리 현금 유치는 대출 금리보다 실질 수익률이 낮아 장기적으로 자산 가치가 잠식됩니다.
               </p>
               <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1 text-[11px]">
                 <span className="text-orange-400 font-bold block">💡 AI 자산관리사의 황금 분배 제안:</span>
-                현재 NH주택담보대출 6억 원의 금리가 <strong>연 4.08%</strong>로 상당한 고금리 부담입니다. 자산관리 관점에서 <span className="text-emerald-300 font-bold">"대출 원금 중도상환 대 미국 S&P500 분할 투자"를 6:4의 황금 비율</span>로 가져가세요.
-                대출 이자율인 4.08%는 확정적 고수익율과 같으므로, 여유자금이 생길 때마다 적극 중도 상환하여 이자 누출을 원천 단축하고, 나머지 40%는 복리 효과가 검증된 TIGER 미국S&P500(+50.33% 수익 입증됨)에 적립식으로 지속 분할 매수하는 것이 압도적으로 유리합니다.
+                현재 {LIABILITY_MORTGAGE.name} {LIABILITY_MORTGAGE.amount.toLocaleString()}원의 금리가 <strong>연 {LIABILITY_MORTGAGE.rate}%</strong>로 상당한 고금리 부담입니다. 자산관리 관점에서 <span className="text-emerald-300 font-bold">"대출 원금 중도상환 대 미국 S&P500 분할 투자"를 6:4의 황금 비율</span>로 가져가세요.
+                대출 이자율인 {LIABILITY_MORTGAGE.rate}%는 확정적 고수익율과 같으므로, 여유자금이 생길 때마다 적극 중도 상환하여 이자 누출을 원천 단축하고, 나머지 40%는 {bestInvestment ? `현재 포트폴리오에서 수익률이 가장 높은 ${bestInvestment.name}(${bestInvestment.yieldRate >= 0 ? "+" : ""}${bestInvestment.yieldRate}% 수익 입증됨)` : "복리 효과가 검증된 우량 지수 추종 ETF"}에 적립식으로 지속 분할 매수하는 것이 압도적으로 유리합니다.
               </div>
             </div>
           </div>
@@ -1029,29 +1013,6 @@ export default function App() {
         </div>
       </div>
     );
-  };
-
-  // Add item handler
-  const handleAddItem = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formContent.trim()) return;
-
-    const newItem: LedgerItem = {
-      id: Date.now(),
-      month: formMonth,
-      type: formType,
-      category: formCategory,
-      content: formContent,
-      amount: formAmount,
-      active: true,
-      date: formDate
-    };
-
-    setLedger(prev => [...prev, newItem]);
-    upsertLedgerItemToSupabase(newItem);
-    setFormContent("");
-    // Switch filter to the month of the added item so they see it
-    setSelectedMonth(formMonth);
   };
 
   // API Key 입력창에 이 암구호를 넣으면, 개인 키 대신 서버(Vercel 서버리스 함수)에 보관된
@@ -3210,143 +3171,6 @@ ${question}`;
                 </div>
               </div>
 
-              {/* ADD DATA MOCK FORM */}
-              <div className="bg-slate-900 text-white rounded-3xl p-6 border border-slate-800 shadow-md space-y-6" id="add_mock_ledger_form">
-                <div>
-                  <h4 className="text-sm sm:text-base font-bold text-white flex items-center space-x-2">
-                    <PlusCircle className="w-5 h-5 text-emerald-400" />
-                    <span>➕ 당월 신규/가상 데이터 모의 입력</span>
-                  </h4>
-                  <p className="text-[11px] text-slate-400">원장 리스트에 새로운 수입이나 돌발 지출을 추가하여 가계 재정 변화를 실시간 분석하세요.</p>
-                </div>
-
-                <form onSubmit={handleAddItem} className="grid grid-cols-1 md:grid-cols-6 gap-4" id="ledger_add_form_elem">
-                  
-                  {/* Month Select */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">대상 월</label>
-                    <select
-                      value={formMonth}
-                      onChange={(e) => setFormMonth(e.target.value)}
-                      className="bg-slate-800 border border-slate-700 rounded-lg w-full px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                    >
-                      <option value="2026-06">2026-06</option>
-                      <option value="2026-07">2026-07</option>
-                      <option value="2026-08">2026-08</option>
-                      <option value="2026-09">2026-09</option>
-                    </select>
-                  </div>
-
-                  {/* Date Input */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">일자 (날짜)</label>
-                    <input
-                      type="date"
-                      value={formDate}
-                      onChange={(e) => setFormDate(e.target.value)}
-                      className="bg-slate-800 border border-slate-700 rounded-lg w-full px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
-                    />
-                  </div>
-
-                  {/* Type Select */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">구분</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => { setFormType("수입"); setFormCategory("급여"); }}
-                        className={`py-2 text-xs rounded-lg font-bold border transition-all ${
-                          formType === "수입"
-                            ? "bg-emerald-600 border-emerald-500 text-white"
-                            : "bg-slate-800 border-slate-700 text-slate-400"
-                        }`}
-                      >
-                        수입
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setFormType("지출"); setFormCategory("식비"); }}
-                        className={`py-2 text-xs rounded-lg font-bold border transition-all ${
-                          formType === "지출"
-                            ? "bg-rose-600 border-rose-500 text-white"
-                            : "bg-slate-800 border-slate-700 text-slate-400"
-                        }`}
-                      >
-                        지출
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Category Select */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">대분류</label>
-                    <select
-                      value={formCategory}
-                      onChange={(e) => setFormCategory(e.target.value)}
-                      className="bg-slate-800 border border-slate-700 rounded-lg w-full px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                    >
-                      {formType === "수입" ? (
-                        <>
-                          <option value="급여">급여</option>
-                          <option value="투자/배당">투자/배당</option>
-                          <option value="이월자금">이월자금</option>
-                          <option value="기타">기타수입</option>
-                        </>
-                      ) : (
-                        <>
-                          <option value="식비">식비</option>
-                          <option value="주거/대출">주거/대출</option>
-                          <option value="양육/기타">양육/기타</option>
-                          <option value="공과금/관리비">공과금/관리비</option>
-                          <option value="생활용품">생활용품</option>
-                          <option value="여가/교통">여가/교통</option>
-                        </>
-                      )}
-                    </select>
-                  </div>
-
-                  {/* Content Memo */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">상세 내용 및 메모</label>
-                    <input
-                      type="text"
-                      placeholder="예: 이마트 장보기, 보너스"
-                      value={formContent}
-                      onChange={(e) => setFormContent(e.target.value)}
-                      className="bg-slate-800 border border-slate-700 rounded-lg w-full px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                    />
-                  </div>
-
-                  {/* Amount Input */}
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-300 font-semibold block">금액 (원)</label>
-                    <div className="relative">
-                      <input
-                        type="number"
-                        min="0"
-                        step="1000"
-                        value={formAmount}
-                        onChange={(e) => setFormAmount(Number(e.target.value))}
-                        className="bg-slate-800 border border-slate-700 rounded-lg w-full pl-3 pr-10 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
-                      />
-                      <span className="absolute right-3 top-2 text-xs text-slate-500 font-bold font-sans">원</span>
-                    </div>
-                  </div>
-
-                  {/* Form Action Button */}
-                  <div className="md:col-span-6 flex justify-end pt-2">
-                    <button
-                      type="submit"
-                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-6 py-2.5 rounded-xl transition-all flex items-center space-x-2 cursor-pointer border border-emerald-500/30"
-                    >
-                      <PlusCircle className="w-4 h-4" />
-                      <span>원장에 모의내역 임시 등록</span>
-                    </button>
-                  </div>
-
-                </form>
-              </div>
-
             </div>
           )}
 
@@ -3985,40 +3809,40 @@ ${question}`;
                         {/* Circle background */}
                         <circle cx="50" cy="50" r="38" fill="transparent" stroke="#F1F5F9" strokeWidth="16" />
                         
-                        {/* Circle 1: Cash/Deposit like (84.8%) */}
-                        <circle 
-                          cx="50" 
-                          cy="50" 
-                          r="38" 
-                          fill="transparent" 
-                          stroke="#10B981" 
-                          strokeWidth="16" 
-                          strokeDasharray="238.76" 
-                          strokeDashoffset={(238.76 * (1 - 0.848))}
+                        {/* Circle 1: Cash/Deposit like */}
+                        <circle
+                          cx="50"
+                          cy="50"
+                          r="38"
+                          fill="transparent"
+                          stroke="#10B981"
+                          strokeWidth="16"
+                          strokeDasharray="238.76"
+                          strokeDashoffset={(238.76 * (1 - cashPercent / 100))}
                         />
-                        
-                        {/* Circle 2: Stocks/Investments (15.2%) */}
-                        <circle 
-                          cx="50" 
-                          cy="50" 
-                          r="38" 
-                          fill="transparent" 
-                          stroke="#F97316" 
-                          strokeWidth="16" 
-                          strokeDasharray="238.76" 
+
+                        {/* Circle 2: Stocks/Investments */}
+                        <circle
+                          cx="50"
+                          cy="50"
+                          r="38"
+                          fill="transparent"
+                          stroke="#F97316"
+                          strokeWidth="16"
+                          strokeDasharray="238.76"
                           strokeDashoffset="238.76" // Align to top
                           style={{
-                            strokeDashoffset: (238.76 * (1 - 0.152)),
-                            transform: "rotate(" + (360 * 0.848) + "deg)",
+                            strokeDashoffset: (238.76 * (1 - investPercent / 100)),
+                            transform: "rotate(" + (360 * cashPercent / 100) + "deg)",
                             transformOrigin: "50% 50%"
                           }}
                         />
                       </svg>
-                      
+
                       {/* Central label */}
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                         <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Asset Ratio</span>
-                        <strong className="text-base font-black text-slate-900 font-mono">15.2%</strong>
+                        <strong className="text-base font-black text-slate-900 font-mono">{investPercent}%</strong>
                         <span className="text-[9px] text-orange-500 font-bold">투자 자산율</span>
                       </div>
                     </div>
@@ -4030,7 +3854,7 @@ ${question}`;
                         <div>
                           <p className="font-bold text-slate-800">예적금 및 현금성 자산</p>
                           <span className="font-mono text-slate-500 text-xs block">
-                            {(totalFree + totalSavings + totalElectronic).toLocaleString()}원 (84.8%)
+                            {(totalFree + totalSavings + totalElectronic).toLocaleString()}원 ({cashPercent}%)
                           </span>
                         </div>
                       </div>
@@ -4040,7 +3864,7 @@ ${question}`;
                         <div>
                           <p className="font-bold text-slate-800">투자성 자산 (주식/CMA)</p>
                           <span className="font-mono text-slate-500 text-xs block">
-                            {totalInvestment.toLocaleString()}원 (15.2%)
+                            {totalInvestment.toLocaleString()}원 ({investPercent}%)
                           </span>
                         </div>
                       </div>
@@ -4056,82 +3880,56 @@ ${question}`;
                       <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
                       <span>📊 주요 주식 종목 평가 (투자 원금 대비 수익 현황)</span>
                     </h4>
-                    <p className="text-xs text-slate-400">TIGER S&P500 (+50.33%) 및 KODEX 차이나테크 (-0.68%) 상세 현황</p>
+                    <p className="text-xs text-slate-400">등록된 투자 자산 종목별 원금 대비 평가 금액과 수익률입니다.</p>
                   </div>
 
                   {/* Compound Stock Bars */}
                   <div className="space-y-6 py-2" id="stock_bars_display">
-                    
-                    {/* Item 1: TIGER S&P500 */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center text-xs">
-                        <strong className="text-slate-800 text-xs sm:text-sm">TIGER 미국S&P500</strong>
-                        <span className="text-emerald-600 font-mono font-bold text-xs bg-emerald-50 px-2 py-0.5 rounded-md">
-                          수익률: +50.33%
-                        </span>
-                      </div>
-                      
-                      {/* Bars overlay */}
-                      <div className="space-y-1">
-                        {/* Principal Bar */}
-                        <div className="relative">
-                          <div className="flex justify-between text-[10px] text-slate-400 mb-0.5 font-bold">
-                            <span>투자 원금:</span>
-                            <span className="font-mono">1,277,189원</span>
-                          </div>
-                          <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                            <div className="bg-slate-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: "66%" }}></div>
-                          </div>
-                        </div>
+                    {investmentAssets.length === 0 ? (
+                      <p className="text-xs text-slate-400 text-center py-6">아직 등록된 투자 자산이 없습니다. 자산 탭에서 엑셀을 업로드해 주세요.</p>
+                    ) : (
+                      investmentAssets.map((item, idx) => {
+                        const maxVal = Math.max(item.principal, item.appraised, 1);
+                        const principalPct = (item.principal / maxVal) * 100;
+                        const appraisedPct = (item.appraised / maxVal) * 100;
+                        const isProfit = item.appraised >= item.principal;
+                        return (
+                          <div className="space-y-2" key={`${item.name}-${idx}`}>
+                            <div className="flex justify-between items-center text-xs">
+                              <strong className="text-slate-800 text-xs sm:text-sm">{item.name}</strong>
+                              <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-md ${isProfit ? "text-emerald-600 bg-emerald-50" : "text-rose-600 bg-rose-50"}`}>
+                                수익률: {item.yieldRate >= 0 ? "+" : ""}{item.yieldRate}%
+                              </span>
+                            </div>
 
-                        {/* Appraised Bar */}
-                        <div className="relative">
-                          <div className="flex justify-between text-[10px] text-slate-500 mb-0.5 font-bold">
-                            <span>평가 금액:</span>
-                            <span className="font-mono text-emerald-600 font-bold">1,919,980원</span>
-                          </div>
-                          <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                            <div className="bg-emerald-500 h-3.5 rounded-lg transition-all duration-500" style={{ width: "100%" }}></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
+                            {/* Bars overlay */}
+                            <div className="space-y-1">
+                              {/* Principal Bar */}
+                              <div className="relative">
+                                <div className="flex justify-between text-[10px] text-slate-400 mb-0.5 font-bold">
+                                  <span>투자 원금:</span>
+                                  <span className="font-mono">{item.principal.toLocaleString()}원</span>
+                                </div>
+                                <div className="w-full bg-slate-100 rounded-lg h-3.5">
+                                  <div className="bg-slate-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: `${principalPct}%` }}></div>
+                                </div>
+                              </div>
 
-                    {/* Item 2: KODEX 차이나테크TOP10 */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center text-xs">
-                        <strong className="text-slate-800 text-xs sm:text-sm">KODEX 차이나테크TOP10</strong>
-                        <span className="text-rose-600 font-mono font-bold text-xs bg-rose-50 px-2 py-0.5 rounded-md">
-                          수익률: -0.68%
-                        </span>
-                      </div>
-
-                      {/* Bars overlay */}
-                      <div className="space-y-1">
-                        {/* Principal Bar */}
-                        <div className="relative">
-                          <div className="flex justify-between text-[10px] text-slate-400 mb-0.5 font-bold">
-                            <span>투자 원금:</span>
-                            <span className="font-mono">1,737,959원</span>
+                              {/* Appraised Bar */}
+                              <div className="relative">
+                                <div className="flex justify-between text-[10px] text-slate-500 mb-0.5 font-bold">
+                                  <span>평가 금액:</span>
+                                  <span className={`font-mono font-bold ${isProfit ? "text-emerald-600" : "text-slate-800"}`}>{item.appraised.toLocaleString()}원</span>
+                                </div>
+                                <div className="w-full bg-slate-100 rounded-lg h-3.5">
+                                  <div className={`h-3.5 rounded-lg transition-all duration-500 ${isProfit ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: `${appraisedPct}%` }}></div>
+                                </div>
+                              </div>
+                            </div>
                           </div>
-                          <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                            <div className="bg-slate-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: "100%" }}></div>
-                          </div>
-                        </div>
-
-                        {/* Appraised Bar */}
-                        <div className="relative">
-                          <div className="flex justify-between text-[10px] text-slate-500 mb-0.5 font-bold">
-                            <span>평가 금액:</span>
-                            <span className="font-mono text-slate-800 font-bold">1,726,080원</span>
-                          </div>
-                          <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                            <div className="bg-rose-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: "99.3%" }}></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
+                        );
+                      })
+                    )}
                   </div>
                 </div>
 
