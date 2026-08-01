@@ -23,12 +23,13 @@ import {
   ArrowDownRight,
   Upload,
   PieChart,
-  BarChart2
+  BarChart2,
+  Search
 } from "lucide-react";
 import { read, utils } from "xlsx";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
-import { emptySyncStatus, loadRemoteFinanceState, type SyncStatus } from "./remoteFinance";
+import { emptySyncStatus, type SyncStatus } from "./remoteFinance";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment } from "./types";
 import { 
   MOVE_IN_DATE,
@@ -502,7 +503,9 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState<string>("2026-07");
   const [isMultiMonth, setIsMultiMonth] = useState<boolean>(false);
   const [selectedMonths, setSelectedMonths] = useState<string[]>(["2026-07"]);
-  const [ledgerSortMode, setLedgerSortMode] = useState<"date" | "spender">("date");
+  const [ledgerSortMode, setLedgerSortMode] = useState<"date" | "spender" | "amount">("date");
+  const [ledgerSearchQuery, setLedgerSearchQuery] = useState<string>("");
+  const [ledgerReflectionFilter, setLedgerReflectionFilter] = useState<"all" | "active" | "inactive">("all");
 
   // 자산 변동 추이 비교 월 (3번: 자산 탭에서 비교할 월들을 직접 선택)
   const [assetCompareMonths, setAssetCompareMonths] = useState<string[]>([]);
@@ -681,51 +684,7 @@ export default function App() {
   }, [investmentAssets]);
 
   useEffect(() => {
-    if (!supabase) {
-      setSyncStatus(emptySyncStatus);
-      return;
-    }
-
-    let cancelled = false;
-
-    const applyRemoteState = async () => {
-      try {
-        const remoteState = await loadRemoteFinanceState(supabase);
-        if (cancelled) return;
-
-        setLedger(remoteState.ledger);
-        setFreeAssets(remoteState.freeAssets);
-        setSavingsAssets([]);
-        setElectronicAssets([]);
-        setInvestmentAssets(remoteState.investmentAssets);
-        setLedgerFileName("Supabase: income_expenses");
-        setAssetsFileName("Supabase: assets_youngbeom + assets_jaeeun");
-        setSyncStatus(remoteState.syncStatus);
-      } catch (error: any) {
-        console.error("[Supabase remote finance sync]", error);
-        if (!cancelled) {
-          setSyncStatus({
-            ...emptySyncStatus,
-            connected: false,
-            statusText: error?.message || "Supabase sync failed",
-          });
-        }
-      }
-    };
-
-    applyRemoteState();
-
-    const channel = supabase
-      .channel("remote_finance_sync_pipeline")
-      .on("postgres_changes", { event: "*", schema: "public", table: "income_expenses" }, applyRemoteState)
-      .on("postgres_changes", { event: "*", schema: "public", table: "assets_youngbeom" }, applyRemoteState)
-      .on("postgres_changes", { event: "*", schema: "public", table: "assets_jaeeun" }, applyRemoteState)
-      .subscribe();
-
-    return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
-    };
+    setSyncStatus(emptySyncStatus);
   }, []);
 
   const toggleAssetExpand = (key: "free" | "savings" | "electronic" | "investment") => {
@@ -1335,9 +1294,16 @@ ${question}`;
   };
 
   const handleAssetsExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
+    setFreeAssets([]);
+    setSavingsAssets([]);
+    setElectronicAssets([]);
+    setInvestmentAssets([]);
+    setAssetsFileName(null);
+
+    files.forEach((file) => {
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
@@ -1651,20 +1617,25 @@ ${question}`;
 
         if (anySheetParsed) {
           const finalInvestments = Array.from(combinedInvestMap.values());
-          setFreeAssets(combinedFree);
+          setFreeAssets(prev => {
+            const merged = [...prev];
+            combinedFree.forEach(item => {
+              if (!merged.some(existing => existing.name === item.name)) merged.push(item);
+            });
+            return merged;
+          });
           setSavingsAssets([]);
           setElectronicAssets([]);
-          setInvestmentAssets(finalInvestments);
+          setInvestmentAssets(prev => {
+            const merged = new Map(prev.map(item => [item.name, item]));
+            finalInvestments.forEach(item => merged.set(item.name, item));
+            return Array.from(merged.values());
+          });
           if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
           if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
-          setAssetsFileName(file.name);
-          syncAssetsReplaceToSupabase(combinedFree, finalInvestments).then(ok => {
-            if (!ok) {
-              alert("⚠️ 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
-            }
-          });
+          setAssetsFileName(prev => prev ? `${prev}, ${file.name}` : file.name);
           updateHouseholdSettingsInSupabase({
-            assets_file_name: file.name,
+            assets_file_name: files.map(f => f.name).join(", "),
             ...(combinedMortgageAmount ? { mortgage_amount: combinedMortgageAmount } : {}),
             ...(combinedMortgageRate ? { mortgage_rate: combinedMortgageRate } : {})
           });
@@ -1678,16 +1649,19 @@ ${question}`;
       }
     };
     reader.readAsBinaryString(file);
+    });
   };
 
   // Toggle item active state
   const handleToggleItem = (id: number) => {
+    const scrollY = window.scrollY;
     setLedger(prev => {
       const next = prev.map(item => item.id === id ? { ...item, active: !item.active } : item);
       const toggled = next.find(item => item.id === id);
       if (toggled) upsertLedgerItemToSupabase(toggled);
       return next;
     });
+    requestAnimationFrame(() => window.scrollTo({ top: scrollY }));
   };
 
   // Delete ledger item
@@ -1698,7 +1672,7 @@ ${question}`;
 
   // 지출 내역을 날짜순(있는 그대로) 또는 지출자별로 묶어서 보여준다.
   const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
-    if (ledgerSortMode === "date") {
+    if (ledgerSortMode !== "spender") {
       return [{ label: null, items }];
     }
     const groups = new Map<string, LedgerItem[]>();
@@ -1710,6 +1684,27 @@ ${question}`;
     return Array.from(groups.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([label, groupItems]) => ({ label, items: groupItems }));
+  };
+
+  const getLedgerItemsForDisplay = (type: "수입" | "지출") => {
+    const query = ledgerSearchQuery.trim().toLowerCase();
+    return ledger
+      .filter(item => (isMultiMonth ? selectedMonths.includes(item.month) : item.month === selectedMonth))
+      .filter(item => item.type === type)
+      .filter(item => {
+        if (ledgerReflectionFilter === "active" && !item.active) return false;
+        if (ledgerReflectionFilter === "inactive" && item.active) return false;
+        if (!query) return true;
+        return [item.category, item.content, item.memo || "", item.spender || "", item.paymentMethod || ""]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => {
+        if (ledgerSortMode === "amount") return Math.abs(b.amount) - Math.abs(a.amount);
+        if (ledgerSortMode === "spender") return (a.spender || "").localeCompare(b.spender || "");
+        return (b.date || "").localeCompare(a.date || "");
+      });
   };
 
   // 체크리스트: 추가/토글/수정/삭제 (Supabase에 저장되어 재접속·다른 기기에서도 유지됨)
@@ -2023,6 +2018,7 @@ ${question}`;
               <input 
                 type="file" 
                 accept=".xlsx, .xls"
+                multiple
                 onChange={handleAssetsExcelUpload}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 title="자산/부채 엑셀 파일 업로드"
@@ -2103,7 +2099,7 @@ ${question}`;
           )}
         </div>
 
-        <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/30" id="sidebar_supabase_sync_status">
+        <div className="hidden" id="sidebar_supabase_sync_status">
           <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Supabase DB Sync</span>
           <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/50 space-y-2 text-xs">
             <div className="flex justify-between gap-3">
@@ -2957,6 +2953,58 @@ ${question}`;
                 >
                   지출자별
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setLedgerSortMode("amount")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    ledgerSortMode === "amount" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                  }`}
+                >
+                  금액순
+                </button>
+              </div>
+
+              <div className="flex flex-col md:flex-row gap-3 bg-white rounded-2xl border border-slate-200 shadow-sm p-3" id="ledger_search_filter_bar">
+                <div className="flex items-center gap-2 flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                  <Search className="w-4 h-4 text-slate-500 shrink-0" />
+                  <input
+                    type="text"
+                    value={ledgerSearchQuery}
+                    onChange={(e) => setLedgerSearchQuery(e.target.value)}
+                    placeholder="거래명, 카테고리, 메모, 지출자 검색"
+                    className="w-full min-w-0 bg-transparent text-xs sm:text-sm text-slate-800 placeholder-slate-400 focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-slate-600">분류:</span>
+                  <button
+                    type="button"
+                    onClick={() => setLedgerReflectionFilter("all")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      ledgerReflectionFilter === "all" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                    }`}
+                  >
+                    전체
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLedgerReflectionFilter("active")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      ledgerReflectionFilter === "active" ? "bg-emerald-600 text-white" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                    }`}
+                  >
+                    반영
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLedgerReflectionFilter("inactive")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      ledgerReflectionFilter === "inactive" ? "bg-rose-600 text-white" : "bg-rose-50 text-rose-700 hover:bg-rose-100"
+                    }`}
+                  >
+                    미반영
+                  </button>
+                </div>
               </div>
 
               {/* TWO LEDGER COLUMNS FOR INCOME AND EXPENSES */}
@@ -2970,16 +3018,16 @@ ${question}`;
                       <span>🟢 수입 내역 리스트</span>
                     </h4>
                     <span className="text-[10px] bg-emerald-50 text-emerald-800 px-2.5 py-0.5 rounded-full font-bold">
-                      총 {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입").length}건
+                      총 {getLedgerItemsForDisplay("수입").length}건
                     </span>
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="income_items_list">
-                    {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입").length === 0 ? (
+                    {getLedgerItemsForDisplay("수입").length === 0 ? (
                        <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 수입 내역이 없습니다.</div>
                     ) : (
                       groupLedgerItemsForDisplay(
-                        ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "수입")
+                        getLedgerItemsForDisplay("수입")
                       ).map((group, gi) => (
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
@@ -3008,7 +3056,7 @@ ${question}`;
                                     }`}
                                     title="클릭 시 가계 연산 반영 여부 전환"
                                   >
-                                    {item.active ? "반영" : "제외"}
+                                    {item.active ? "반영" : "미반영"}
                                   </button>
                                   <div className="min-w-0">
                                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -3076,16 +3124,16 @@ ${question}`;
                       <span>🔴 지출 내역 리스트</span>
                     </h4>
                     <span className="text-[10px] bg-rose-50 text-rose-800 px-2.5 py-0.5 rounded-full font-bold">
-                      총 {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출").length}건
+                      총 {getLedgerItemsForDisplay("지출").length}건
                     </span>
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="expense_items_list">
-                    {ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출").length === 0 ? (
+                    {getLedgerItemsForDisplay("지출").length === 0 ? (
                       <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 지출 내역이 없습니다.</div>
                     ) : (
                       groupLedgerItemsForDisplay(
-                        ledger.filter(x => (isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth) && x.type === "지출")
+                        getLedgerItemsForDisplay("지출")
                       ).map((group, gi) => (
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
@@ -3114,7 +3162,7 @@ ${question}`;
                                     }`}
                                     title="클릭 시 가계 연산 반영 여부 전환"
                                   >
-                                    {item.active ? "반영" : "제외"}
+                                    {item.active ? "반영" : "미반영"}
                                   </button>
                                   <div className="min-w-0">
                                     <div className="flex items-center gap-1.5 flex-wrap">
