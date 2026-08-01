@@ -1,19 +1,15 @@
 {
-  "builds": [
-    {
-      "src": "app.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "app.py"
-    }
-  ],
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "app.py": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "excludeFiles": "{node_modules/**,dist/**,assets/**,**/*.xlsx,**/*.xls,.claude/**}"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/app.py"
+    }
+  ]
 }

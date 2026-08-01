@@ -1,128 +1,83 @@
--- 우리집 통합 재정 대시보드 - Supabase 스키마
--- Supabase 대시보드 → SQL Editor에 이 파일 전체를 붙여넣고 실행하세요.
--- anon(publishable) 키로는 이 DDL을 실행할 수 없습니다. 반드시 대시보드에서 직접 실행해야 합니다.
-
-create table if not exists ledger_items (
-  id bigint primary key,
-  month text not null,
+create table if not exists public.income_expenses (
+  id bigserial primary key,
+  date date not null,
   type text not null check (type in ('수입', '지출')),
-  category text not null,
-  content text not null,
-  amount numeric not null,
-  active boolean not null default true,
-  date text not null,
-  memo text not null default '',
+  category text not null default '미분류',
+  content text not null default '',
+  amount numeric not null default 0,
+  amount_abs numeric not null default 0,
   payment_method text not null default '',
   spender text not null default '',
-  updated_at timestamptz not null default now()
-);
-
--- 기존에 이미 테이블을 만든 경우를 위한 안전한 컬럼 추가(이미 있으면 아무 일도 하지 않음)
-alter table ledger_items add column if not exists spender text not null default '';
-
-create table if not exists asset_free_items (
-  id bigserial primary key,
-  name text not null,
-  amount numeric not null,
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists asset_investment_items (
-  id bigserial primary key,
-  name text not null,
-  principal numeric not null,
-  appraised numeric not null,
-  yield_rate numeric not null default 0,
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists checklist_items (
-  id bigserial primary key,
-  label text not null,
-  done boolean not null default false,
-  sort_order int not null default 0,
-  updated_at timestamptz not null default now()
-);
-
--- 대출 상환 기록: 상환할 때마다 한 행씩 쌓이고, 남은 원금/이자는 앱에서 순차 계산합니다.
-create table if not exists mortgage_payments (
-  id bigserial primary key,
-  payment_date date not null,
-  amount numeric not null,
   memo text not null default '',
+  source_file text not null default '',
+  synced_at timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
 
-create table if not exists household_settings (
-  id int primary key default 1,
-  mortgage_name text not null default 'NH주택담보대출',
-  mortgage_amount numeric not null default 600000000,
-  mortgage_rate numeric not null default 4.08,
-  mortgage_start_date date,
-  mortgage_end_date date,
-  ledger_file_name text,
-  assets_file_name text,
-  updated_at timestamptz not null default now(),
-  constraint household_settings_single_row check (id = 1)
+create table if not exists public.assets_youngbeom (
+  id bigserial primary key,
+  owner text not null default '영범',
+  name text not null,
+  category text not null default '금융자산',
+  amount numeric not null default 0,
+  source_sheet text not null default '',
+  source_file text not null default '',
+  synced_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
 );
-insert into household_settings (id) values (1) on conflict (id) do nothing;
 
--- Row Level Security: 로그인(인증)한 사용자만 읽고 쓸 수 있음.
--- 이 앱은 부부가 공유 계정 하나로 로그인하는 구조이므로 "authenticated"면 모두 허용합니다.
-alter table ledger_items enable row level security;
-alter table asset_free_items enable row level security;
-alter table asset_investment_items enable row level security;
-alter table checklist_items enable row level security;
-alter table mortgage_payments enable row level security;
-alter table household_settings enable row level security;
+create table if not exists public.assets_jaeeun (
+  id bigserial primary key,
+  owner text not null default '재은',
+  name text not null,
+  category text not null default '금융자산',
+  amount numeric not null default 0,
+  source_sheet text not null default '',
+  source_file text not null default '',
+  synced_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
 
-drop policy if exists "authenticated_all" on ledger_items;
-create policy "authenticated_all" on ledger_items for all to authenticated using (true) with check (true);
+alter table public.income_expenses add column if not exists source_file text not null default '';
+alter table public.income_expenses add column if not exists synced_at timestamptz not null default now();
+alter table public.assets_youngbeom add column if not exists source_file text not null default '';
+alter table public.assets_youngbeom add column if not exists synced_at timestamptz not null default now();
+alter table public.assets_jaeeun add column if not exists source_file text not null default '';
+alter table public.assets_jaeeun add column if not exists synced_at timestamptz not null default now();
 
-drop policy if exists "authenticated_all" on asset_free_items;
-create policy "authenticated_all" on asset_free_items for all to authenticated using (true) with check (true);
+alter table public.income_expenses enable row level security;
+alter table public.assets_youngbeom enable row level security;
+alter table public.assets_jaeeun enable row level security;
 
-drop policy if exists "authenticated_all" on asset_investment_items;
-create policy "authenticated_all" on asset_investment_items for all to authenticated using (true) with check (true);
+grant usage on schema public to anon, authenticated;
+grant select on public.income_expenses to anon, authenticated;
+grant select on public.assets_youngbeom to anon, authenticated;
+grant select on public.assets_jaeeun to anon, authenticated;
 
-drop policy if exists "authenticated_all" on checklist_items;
-create policy "authenticated_all" on checklist_items for all to authenticated using (true) with check (true);
+drop policy if exists "read income_expenses" on public.income_expenses;
+drop policy if exists "read assets_youngbeom" on public.assets_youngbeom;
+drop policy if exists "read assets_jaeeun" on public.assets_jaeeun;
 
-drop policy if exists "authenticated_all" on mortgage_payments;
-create policy "authenticated_all" on mortgage_payments for all to authenticated using (true) with check (true);
+create policy "read income_expenses"
+on public.income_expenses for select
+to anon, authenticated
+using (true);
 
-drop policy if exists "authenticated_all" on household_settings;
-create policy "authenticated_all" on household_settings for all to authenticated using (true) with check (true);
+create policy "read assets_youngbeom"
+on public.assets_youngbeom for select
+to anon, authenticated
+using (true);
 
--- 실시간 동기화(다른 기기에서 업로드하면 즉시 반영)를 위해 Realtime publication에 테이블 추가
--- 이미 추가되어 있다면 오류 없이 무시됩니다.
-do $$
-begin
-  alter publication supabase_realtime add table ledger_items;
-exception when duplicate_object then null;
-end $$;
-do $$
-begin
-  alter publication supabase_realtime add table asset_free_items;
-exception when duplicate_object then null;
-end $$;
-do $$
-begin
-  alter publication supabase_realtime add table asset_investment_items;
-exception when duplicate_object then null;
-end $$;
-do $$
-begin
-  alter publication supabase_realtime add table checklist_items;
-exception when duplicate_object then null;
-end $$;
-do $$
-begin
-  alter publication supabase_realtime add table mortgage_payments;
-exception when duplicate_object then null;
-end $$;
-do $$
-begin
-  alter publication supabase_realtime add table household_settings;
-exception when duplicate_object then null;
-end $$;
+create policy "read assets_jaeeun"
+on public.assets_jaeeun for select
+to anon, authenticated
+using (true);
+
+create index if not exists income_expenses_date_idx on public.income_expenses (date desc);
+create index if not exists income_expenses_type_idx on public.income_expenses (type);
+create index if not exists income_expenses_category_idx on public.income_expenses (category);
+create index if not exists income_expenses_synced_at_idx on public.income_expenses (synced_at desc);
+create index if not exists assets_youngbeom_amount_idx on public.assets_youngbeom (amount desc);
+create index if not exists assets_youngbeom_synced_at_idx on public.assets_youngbeom (synced_at desc);
+create index if not exists assets_jaeeun_amount_idx on public.assets_jaeeun (amount desc);
+create index if not exists assets_jaeeun_synced_at_idx on public.assets_jaeeun (synced_at desc);
