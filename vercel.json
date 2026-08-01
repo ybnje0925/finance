@@ -1,15 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "functions": {
-    "app.py": {
-      "maxDuration": 60,
-      "excludeFiles": "{node_modules/**,dist/**,assets/**,**/*.xlsx,**/*.xls,.claude/**}"
+    "api/gemini-chat.ts": {
+      "maxDuration": 60
     }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/app.py"
-    }
-  ]
+  }
 }

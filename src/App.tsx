@@ -1781,7 +1781,9 @@ ${question}`;
   };
 
   // --- SUPABASE AUTH GATE ---
-  if (isSupabaseConfigured && authLoading) {
+  const authGateEnabled = false;
+
+  if (authGateEnabled && isSupabaseConfigured && authLoading) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center">
         <div className="text-slate-400 text-sm font-bold animate-pulse">불러오는 중...</div>
@@ -1790,7 +1792,7 @@ ${question}`;
   }
 
   // 이메일의 재설정 링크를 클릭해서 돌아온 경우: 세션이 있어도(임시 복구 세션) 새 비밀번호 설정 화면을 먼저 보여준다.
-  if (isSupabaseConfigured && authView === "reset") {
+  if (authGateEnabled && isSupabaseConfigured && authView === "reset") {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="reset_password_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
@@ -1846,7 +1848,7 @@ ${question}`;
     );
   }
 
-  if (isSupabaseConfigured && !session) {
+  if (authGateEnabled && isSupabaseConfigured && !session) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
