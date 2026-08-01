@@ -37,9 +37,10 @@ const toAmount = (value: unknown) => {
   return Number.isFinite(parsed) ? Math.round(parsed) : 0;
 };
 
-const ownerTaggedName = (owner: "영범" | "재은", value: unknown) => {
-  const rawName = String(value || "자산 항목").trim();
-  return rawName.startsWith(`[${owner}]`) ? rawName : `[${owner}] ${rawName}`;
+const ownerTag = (owner: "영범" | "재은", value: unknown) => {
+  const prefix = owner === "영범" ? "[YB]" : "[JE]";
+  const rawName = String(value || "미분류 자산").trim();
+  return rawName.startsWith(prefix) ? rawName : `${prefix} ${rawName}`;
 };
 
 const latestSyncTime = (rows: any[]) => {
@@ -49,42 +50,40 @@ const latestSyncTime = (rows: any[]) => {
     .map((value) => new Date(value).getTime())
     .filter(Number.isFinite)
     .sort((a, b) => b - a)[0];
-
-  return latest ? new Date(latest).toLocaleString("ko-KR") : new Date().toLocaleString("ko-KR");
+  return latest ? new Date(latest).toLocaleString("ko-KR") : "-";
 };
 
-const fetchRows = async (supabase: SupabaseClient, table: string, orderColumn: string, ascending = false) => {
+async function fetchRowsSafe(supabase: SupabaseClient, table: string, orderColumn: string) {
   const rows: any[] = [];
   let from = 0;
-
   while (true) {
     const { data, error } = await supabase
       .from(table)
       .select("*")
-      .order(orderColumn, { ascending })
+      .order(orderColumn, { ascending: false })
       .range(from, from + pageSize - 1);
-
     if (error) {
-      throw new Error(`${table}: ${error.message}`);
+      if (error.message.includes("Could not find the table")) {
+        return { rows: [], missingTable: true, error: null as string | null };
+      }
+      return { rows: [], missingTable: false, error: `${table}: ${error.message}` };
     }
     if (!data || data.length === 0) break;
-
     rows.push(...data);
     if (data.length < pageSize) break;
     from += pageSize;
   }
-
-  return rows;
-};
+  return { rows, missingTable: false, error: null as string | null };
+}
 
 export const loadRemoteFinanceState = async (supabase: SupabaseClient): Promise<RemoteFinanceState> => {
-  const [incomeExpenses, youngbeomAssets, jaeeunAssets] = await Promise.all([
-    fetchRows(supabase, "income_expenses", "date", false),
-    fetchRows(supabase, "assets_youngbeom", "amount", false),
-    fetchRows(supabase, "assets_jaeeun", "amount", false),
+  const [incomeExpensesRes, youngbeomRes, jaeeunRes] = await Promise.all([
+    fetchRowsSafe(supabase, "income_expenses", "date"),
+    fetchRowsSafe(supabase, "assets_youngbeom", "amount"),
+    fetchRowsSafe(supabase, "assets_jaeeun", "amount"),
   ]);
 
-  const ledger: LedgerItem[] = incomeExpenses.map((row, index) => {
+  const ledger: LedgerItem[] = incomeExpensesRes.rows.map((row, index) => {
     const signedAmount = toAmount(row.amount);
     const amount = toAmount(row.amount_abs || Math.abs(signedAmount));
     const date = String(row.date || "").slice(0, 10);
@@ -106,32 +105,32 @@ export const loadRemoteFinanceState = async (supabase: SupabaseClient): Promise<
   });
 
   const freeAssets = [
-    ...youngbeomAssets.map((row) => ({
-      name: ownerTaggedName("영범", row.name),
+    ...youngbeomRes.rows.map((row) => ({
+      name: ownerTag("영범", row.name),
       amount: toAmount(row.amount),
     })),
-    ...jaeeunAssets.map((row) => ({
-      name: ownerTaggedName("재은", row.name),
+    ...jaeeunRes.rows.map((row) => ({
+      name: ownerTag("재은", row.name),
       amount: toAmount(row.amount),
     })),
   ];
-
-  const youngbeomTotal = youngbeomAssets.reduce((sum, row) => sum + toAmount(row.amount), 0);
-  const jaeeunTotal = jaeeunAssets.reduce((sum, row) => sum + toAmount(row.amount), 0);
 
   return {
     ledger,
     freeAssets,
     investmentAssets: [],
     syncStatus: {
-      connected: true,
-      loadedAt: latestSyncTime([...incomeExpenses, ...youngbeomAssets, ...jaeeunAssets]),
-      statusText: "Supabase DB sync active",
-      incomeExpensesCount: incomeExpenses.length,
-      youngbeomCount: youngbeomAssets.length,
-      jaeeunCount: jaeeunAssets.length,
-      youngbeomTotal,
-      jaeeunTotal,
+      connected: !(incomeExpensesRes.missingTable || youngbeomRes.missingTable || jaeeunRes.missingTable),
+      loadedAt: latestSyncTime([...incomeExpensesRes.rows, ...youngbeomRes.rows, ...jaeeunRes.rows]),
+      statusText:
+        incomeExpensesRes.error || youngbeomRes.error || jaeeunRes.error
+          ? [incomeExpensesRes.error, youngbeomRes.error, jaeeunRes.error].filter(Boolean).join(" | ")
+          : "Supabase DB sync active",
+      incomeExpensesCount: incomeExpensesRes.rows.length,
+      youngbeomCount: youngbeomRes.rows.length,
+      jaeeunCount: jaeeunRes.rows.length,
+      youngbeomTotal: youngbeomRes.rows.reduce((sum, row) => sum + toAmount(row.amount), 0),
+      jaeeunTotal: jaeeunRes.rows.reduce((sum, row) => sum + toAmount(row.amount), 0),
     },
   };
 };
