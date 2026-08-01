@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "streamlit run app.py",
-    "build": "echo \"Python Streamlit app - no frontend build step\"",
-    "preview": "streamlit run app.py"
+    "dev": "python app.py",
+    "build": "echo \"Python Flask app - no frontend build step\"",
+    "preview": "python app.py"
   },
   "dependencies": {},
   "devDependencies": {}
