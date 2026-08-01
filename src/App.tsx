@@ -26,9 +26,9 @@ import {
   BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
-import { GoogleGenAI } from "@google/genai";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
+import { emptySyncStatus, loadRemoteFinanceState, type SyncStatus } from "./remoteFinance";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment } from "./types";
 import { 
   MOVE_IN_DATE,
@@ -158,9 +158,10 @@ function SVGMultiPieChart({ items }: { items: [string, number][] }) {
 
 export default function App() {
   // --- 1. LOCAL STORAGE & STATE INITIALIZATION ---
-  const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "analysis" | "assets">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "analysis" | "assets" | "report">("overview");
   const [ledgerFileName, setLedgerFileName] = useState<string | null>(null);
   const [assetsFileName, setAssetsFileName] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySyncStatus);
 
   const formatDateLabel = (dateStr: string) => {
     if (!dateStr) return "";
@@ -509,15 +510,10 @@ export default function App() {
   // 재무적 지출 분석 탭: 카테고리별 상세 지출 드릴다운 선택 상태
   const [drilldownCategory, setDrilldownCategory] = useState<string>("전체");
 
-  // Gemini 데이터 분석 챗봇: 개인 API Key는 이 브라우저에만 저장되고 외부로 전송되지 않는다.
-  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => localStorage.getItem("VIVALDI_GEMINI_KEY") || "");
+  // Gemini 데이터 분석 챗봇: Vercel 서버리스 함수의 GEMINI_API_KEY 환경변수로 자동 호출한다.
   const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
   const [chatInput, setChatInput] = useState<string>("");
   const [chatLoading, setChatLoading] = useState<boolean>(false);
-
-  useEffect(() => {
-    localStorage.setItem("VIVALDI_GEMINI_KEY", geminiApiKey);
-  }, [geminiApiKey]);
 
   // 직접 메모 기능 (VIVALDI_CATEGORY_MEMOS)
   const [categoryMemos, setCategoryMemos] = useState<Record<string, Record<string, string>>>(() => {
@@ -683,6 +679,54 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("VIVALDI_INVESTMENT_ASSETS", JSON.stringify(investmentAssets));
   }, [investmentAssets]);
+
+  useEffect(() => {
+    if (!supabase) {
+      setSyncStatus(emptySyncStatus);
+      return;
+    }
+
+    let cancelled = false;
+
+    const applyRemoteState = async () => {
+      try {
+        const remoteState = await loadRemoteFinanceState(supabase);
+        if (cancelled) return;
+
+        setLedger(remoteState.ledger);
+        setFreeAssets(remoteState.freeAssets);
+        setSavingsAssets([]);
+        setElectronicAssets([]);
+        setInvestmentAssets(remoteState.investmentAssets);
+        setLedgerFileName("Supabase: income_expenses");
+        setAssetsFileName("Supabase: assets_youngbeom + assets_jaeeun");
+        setSyncStatus(remoteState.syncStatus);
+      } catch (error: any) {
+        console.error("[Supabase remote finance sync]", error);
+        if (!cancelled) {
+          setSyncStatus({
+            ...emptySyncStatus,
+            connected: false,
+            statusText: error?.message || "Supabase sync failed",
+          });
+        }
+      }
+    };
+
+    applyRemoteState();
+
+    const channel = supabase
+      .channel("remote_finance_sync_pipeline")
+      .on("postgres_changes", { event: "*", schema: "public", table: "income_expenses" }, applyRemoteState)
+      .on("postgres_changes", { event: "*", schema: "public", table: "assets_youngbeom" }, applyRemoteState)
+      .on("postgres_changes", { event: "*", schema: "public", table: "assets_jaeeun" }, applyRemoteState)
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, []);
 
   const toggleAssetExpand = (key: "free" | "savings" | "electronic" | "investment") => {
     setExpandedAssets(prev => ({
@@ -1017,41 +1061,41 @@ export default function App() {
 
   // API Key 입력창에 이 암구호를 넣으면, 개인 키 대신 서버(Vercel 서버리스 함수)에 보관된
   // 가족 공용 마스터 키로 자동 전환된다. 진짜 키는 서버 환경변수에만 있고 브라우저로는 절대 내려오지 않는다.
-  const GEMINI_MASTER_PASSPHRASE = "최연준 최고";
-
-  // Gemini 데이터 분석 챗봇: 업로드된 수입/지출·자산 데이터를 컨텍스트로 전달해 질문에 답한다.
   const handleSendChatMessage = async () => {
     const question = chatInput.trim();
     if (!question || chatLoading) return;
 
     setChatMessages(prev => [...prev, { role: "user", text: question }]);
     setChatInput("");
-
-    const trimmedKey = geminiApiKey.trim();
-    if (!trimmedKey) {
-      setChatMessages(prev => [...prev, { role: "assistant", text: "🔑 개인 Gemini API Key를 입력해 주세요." }]);
-      return;
-    }
-
     setChatLoading(true);
+
     try {
-      const ledgerContext = ledger.map(item => ({
-        월: item.month,
-        구분: item.type,
-        카테고리: item.category,
-        내용: item.content,
-        금액: item.amount,
-        활성화: item.active
+      const ledgerContext = ledger.slice(0, 300).map(item => ({
+        month: item.month,
+        date: item.date,
+        type: item.type,
+        category: item.category,
+        content: item.content,
+        amount: item.amount,
+        active: item.active,
+        paymentMethod: item.paymentMethod || "",
+        spender: item.spender || "",
+        memo: item.memo || ""
       }));
       const assetContext = {
-        자유입출금및예적금: freeAssets,
-        투자자산: investmentAssets,
-        부채: { 명칭: LIABILITY_MORTGAGE.name, 금액: LIABILITY_MORTGAGE.amount, 금리: LIABILITY_MORTGAGE.rate },
-        가계총자산: totalAssets
+        freeAssets,
+        savingsAssets,
+        electronicAssets,
+        investmentAssets,
+        mortgage: { name: LIABILITY_MORTGAGE.name, amount: LIABILITY_MORTGAGE.amount, rate: LIABILITY_MORTGAGE.rate },
+        youngbeomTotal: syncStatus.youngbeomTotal,
+        jaeeunTotal: syncStatus.jaeeunTotal,
+        totalAssets,
+        netWorth
       };
-
-      const prompt = `당신은 ${HUSBAND.name}·${WIFE.name} 부부의 가계부 데이터 분석 비서입니다.
-아래는 이 가계의 실제 수입/지출 내역(JSON)과 자산 요약(JSON)입니다. 오직 이 데이터를 근거로 사용자의 질문에 한국어로 간결하고 정확하게 답변하세요. 금액은 천 단위 콤마와 "원" 단위로 표기하세요.
+      const prompt = `당신은 한국어로 답하는 가계 재무 분석 비서입니다.
+아래 Supabase 최신 수입/지출/자산 데이터를 근거로만 답하세요.
+금액은 천 단위 콤마와 원 단위로 표기하고, 판단 근거를 짧게 설명하세요.
 
 [수입/지출 내역]
 ${JSON.stringify(ledgerContext)}
@@ -1062,34 +1106,21 @@ ${JSON.stringify(assetContext)}
 [질문]
 ${question}`;
 
-      let answerText: string;
-      if (trimmedKey === GEMINI_MASTER_PASSPHRASE) {
-        const res = await fetch("/api/gemini-chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "서버 요청 실패");
-        answerText = data.text || "응답을 생성하지 못했습니다.";
-      } else {
-        const ai = new GoogleGenAI({ apiKey: trimmedKey });
-        const response = await ai.models.generateContent({
-          model: "gemini-1.5-flash",
-          contents: prompt
-        });
-        answerText = response.text || "응답을 생성하지 못했습니다.";
-      }
-
-      setChatMessages(prev => [...prev, { role: "assistant", text: answerText }]);
-    } catch (error) {
+      const res = await fetch("/api/gemini-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "서버 요청 실패");
+      setChatMessages(prev => [...prev, { role: "assistant", text: data.text || "답변을 생성하지 못했습니다." }]);
+    } catch (error: any) {
       console.error(error);
-      setChatMessages(prev => [...prev, { role: "assistant", text: "⚠️ Gemini API 호출 중 오류가 발생했습니다. API Key(또는 암구호)가 올바른지 확인해 주세요." }]);
+      setChatMessages(prev => [...prev, { role: "assistant", text: `Gemini API 호출 중 오류가 발생했습니다. ${error?.message || "Vercel 환경변수를 확인해 주세요."}` }]);
     } finally {
       setChatLoading(false);
     }
   };
-
   // --- 2b. EXCEL DATA PARSING ENGINES (SMART UNIFIED SPLIT SHIELD) ---
   const handleLedgerExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2072,6 +2103,25 @@ ${question}`;
           )}
         </div>
 
+        <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/30" id="sidebar_supabase_sync_status">
+          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Supabase DB Sync</span>
+          <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/50 space-y-2 text-xs">
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-400">연동 상태</span>
+              <span className={`font-bold ${syncStatus.connected ? "text-emerald-400" : "text-rose-300"}`}>{syncStatus.statusText}</span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-400">최종 동기화</span>
+              <span className="font-mono text-slate-200 text-right">{syncStatus.loadedAt}</span>
+            </div>
+            <div className="grid grid-cols-1 gap-1 pt-2 border-t border-slate-700/60">
+              <div className="flex justify-between"><span className="text-slate-400">income_expenses</span><strong>{syncStatus.incomeExpensesCount.toLocaleString()}건</strong></div>
+              <div className="flex justify-between"><span className="text-slate-400">assets_youngbeom</span><strong>{syncStatus.youngbeomCount.toLocaleString()}건</strong></div>
+              <div className="flex justify-between"><span className="text-slate-400">assets_jaeeun</span><strong>{syncStatus.jaeeunCount.toLocaleString()}건</strong></div>
+            </div>
+          </div>
+        </div>
+
         {/* Sidebar Profiles & Home Info */}
         <div className="p-6 border-b border-slate-800 space-y-4" id="sidebar_info">
           <div className="space-y-2">
@@ -2149,6 +2199,19 @@ ${question}`;
             <TrendingUp className="w-4 h-4 text-emerald-400" />
             <span>📈 자산 및 부채</span>
           </button>
+
+          <button
+            onClick={() => setActiveTab("report")}
+            className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              activeTab === "report"
+                ? "bg-slate-800 text-white shadow-sm border border-slate-700"
+                : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"
+            }`}
+            id="nav_btn_report"
+          >
+            <BarChart2 className="w-4 h-4 text-emerald-400" />
+            <span>🧩 가계부 및 앱 개선 리포트</span>
+          </button>
         </nav>
 
         {/* Sidebar Footer */}
@@ -2180,6 +2243,7 @@ ${question}`;
               {activeTab === "ledger" && "💸 지출과 수입 (Interactive Ledger)"}
               {activeTab === "analysis" && "📊 재무적 지출 분석 (Financial Expense Analysis)"}
               {activeTab === "assets" && "📈 자산 및 부채 (Asset & Trend Analysis)"}
+              {activeTab === "report" && "🧩 가계부 및 앱 개선 리포트"}
             </h2>
           </div>
         </header>
@@ -2702,17 +2766,11 @@ ${question}`;
                   </p>
                 </div>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-600 block">🔑 개인 Gemini API Key (또는 가족 암구호)</label>
-                  <input
-                    type="password"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="AIzaSy... 또는 암구호 입력"
-                    className="bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-xs sm:text-sm w-full font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    id="gemini_api_key_input"
-                  />
-                  <p className="text-[10px] text-slate-400">개인 키는 이 브라우저에만 저장되며 외부 서버로 전송되지 않습니다. (Google AI Studio에서 발급) 가족 암구호를 입력하면 서버에 등록된 공용 키로 자동 전환됩니다.</p>
+                <div className="bg-indigo-50 border border-indigo-100 rounded-2xl px-4 py-3">
+                  <p className="text-xs font-bold text-indigo-700">Gemini 자동 연결</p>
+                  <p className="text-[11px] text-indigo-500 mt-0.5">
+                    브라우저 키 입력 없이 Vercel 환경변수 GEMINI_API_KEY로 gemini-1.5-flash를 호출합니다.
+                  </p>
                 </div>
 
                 <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-3 max-h-80 overflow-y-auto" id="gemini_chat_messages">
@@ -4083,6 +4141,100 @@ ${question}`;
             </div>
           )}
 
+          {activeTab === "report" && (
+            <div className="space-y-8" id="improvement_report_tab">
+              {(() => {
+                const activeLedger = ledger.filter(item => item.active);
+                const totalIncomeAll = activeLedger.filter(item => item.type === "수입").reduce((sum, item) => sum + item.amount, 0);
+                const totalExpenseAll = activeLedger.filter(item => item.type === "지출").reduce((sum, item) => sum + item.amount, 0);
+                const expenseRatio = totalIncomeAll > 0 ? (totalExpenseAll / totalIncomeAll) * 100 : 0;
+                const fixedExpense = activeLedger
+                  .filter(item => item.type === "지출" && getCategoryType(item.category) === "고정비")
+                  .reduce((sum, item) => sum + item.amount, 0);
+                const variableExpense = Math.max(0, totalExpenseAll - fixedExpense);
+                const fixedRatio = totalExpenseAll > 0 ? (fixedExpense / totalExpenseAll) * 100 : 0;
+                const variableRatio = totalExpenseAll > 0 ? (variableExpense / totalExpenseAll) * 100 : 0;
+                const topExpenseCategory = Object.entries(
+                  activeLedger
+                    .filter(item => item.type === "지출")
+                    .reduce((acc, item) => {
+                      acc[item.category] = (acc[item.category] || 0) + item.amount;
+                      return acc;
+                    }, {} as Record<string, number>)
+                ).sort((a, b) => b[1] - a[1])[0];
+                const diagnosis =
+                  expenseRatio >= 80
+                    ? "수입 대비 지출 비중이 높습니다. 반복 결제와 고정비를 먼저 낮춰야 현금흐름 개선 효과가 큽니다."
+                    : expenseRatio >= 60
+                      ? "지출 비중은 관리 가능한 범위지만, 상위 소비 카테고리의 예산선을 월 단위로 추적할 필요가 있습니다."
+                      : "수입 대비 지출 구조가 안정적입니다. 남는 현금흐름을 비상금, 조기상환, 투자 재원으로 분리해도 좋습니다.";
+
+                return (
+                  <>
+                    <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6">
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                          <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">🧩</span>
+                          <span>재무 체질 개선 리포트</span>
+                        </h3>
+                        <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                          Supabase 최신 수입/지출/자산 데이터를 기준으로 가계 구조를 자동 진단합니다.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
+                          <span className="text-xs font-bold text-slate-500">수입 대비 지출</span>
+                          <strong className="block mt-2 text-2xl font-black font-mono text-rose-600">{expenseRatio.toFixed(1)}%</strong>
+                        </div>
+                        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
+                          <span className="text-xs font-bold text-slate-500">고정비 / 변동비</span>
+                          <strong className="block mt-2 text-2xl font-black font-mono text-indigo-700">{fixedRatio.toFixed(1)}% / {variableRatio.toFixed(1)}%</strong>
+                        </div>
+                        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
+                          <span className="text-xs font-bold text-slate-500">순금융자산</span>
+                          <strong className={`block mt-2 text-2xl font-black font-mono ${netWorth >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{netWorth.toLocaleString()}원</strong>
+                        </div>
+                        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
+                          <span className="text-xs font-bold text-slate-500">가계 총 자산</span>
+                          <strong className="block mt-2 text-2xl font-black font-mono text-slate-900">{totalAssets.toLocaleString()}원</strong>
+                        </div>
+                      </div>
+
+                      <div className="bg-blue-50/50 border-l-4 border-blue-500 rounded-r-2xl p-4">
+                        <p className="text-sm font-bold text-blue-900">자동 진단</p>
+                        <p className="text-xs sm:text-sm text-slate-700 mt-1 leading-relaxed">{diagnosis}</p>
+                        {topExpenseCategory && (
+                          <p className="text-xs text-slate-500 mt-2">
+                            현재 가장 큰 지출 카테고리는 <strong>{topExpenseCategory[0]}</strong>이며, 합계는 <strong>{topExpenseCategory[1].toLocaleString()}원</strong>입니다.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-5">
+                      <h3 className="text-lg font-bold text-slate-900">앱 및 기능 개선 제안</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {[
+                          "카테고리별 월 예산선을 저장하고 80%, 100% 도달 시 경고 표시",
+                          "최근 3개월 평균 대비 급증한 소비 항목 자동 알림",
+                          "비상금 목표액과 현재 달성률을 자산 데이터와 연결",
+                          "영범/재은 자산 비중과 가계 총 자산 추이를 월별로 비교",
+                          "Gemini 챗봇 추천 내용을 리포트 메모로 저장",
+                          "주담대 조기상환 시뮬레이터 결과를 월별 상환 계획으로 저장"
+                        ].map((item) => (
+                          <div key={item} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs sm:text-sm text-slate-700 font-semibold">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
         </div>
 
         {/* --- GLOBAL APP FOOTER --- */}
@@ -4096,4 +4248,3 @@ ${question}`;
     </div>
   );
 }
-
