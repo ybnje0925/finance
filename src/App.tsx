@@ -1297,6 +1297,26 @@ ${question}`;
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
+    const parseAssetAmountCell = (value: unknown) => {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return Math.round(Math.abs(value));
+      }
+      if (typeof value === "string") {
+        const cleaned = value.replace(/,/g, "").replace(/원/g, "").replace(/\s/g, "").trim();
+        if (!cleaned || cleaned === "-") return null;
+        const parsed = Number(cleaned);
+        return Number.isFinite(parsed) ? Math.round(Math.abs(parsed)) : null;
+      }
+      return null;
+    };
+
+    const getOwnerTagFromFileName = (name: string) => {
+      const upper = name.toUpperCase();
+      if (upper.includes("[JE]")) return "[재은] ";
+      if (upper.includes("[YB]")) return "[영범] ";
+      return "";
+    };
+
     setFreeAssets([]);
     setSavingsAssets([]);
     setElectronicAssets([]);
@@ -1332,7 +1352,7 @@ ${question}`;
 
           // 시트 이름이 "현황/자산/재무/뱅샐/고객/asset" 같은 일반 구조 키워드가 아니라면
           // (예: "영범", "재은") 실제 명의로 간주하여 계좌명 앞에 명의 태그를 붙인다.
-          const ownerTag = isAssetsSheetName ? "" : `[${wsname}] `;
+          const ownerTag = getOwnerTagFromFileName(file.name) || (isAssetsSheetName ? "" : `[${wsname}] `);
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
             let parsedStructured = false;
@@ -1400,11 +1420,10 @@ ${question}`;
 
                     const nameCell = assetNameCol !== undefined ? row[assetNameCol] : undefined;
                     const amountCell = assetAmountCol !== undefined ? row[assetAmountCol] : undefined;
+                    const amount = parseAssetAmountCell(amountCell);
 
-                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && typeof amountCell === "number") {
+                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && amount !== null) {
                       const name = ownerTag + nameCell.trim();
-                      // 원 단위는 소수점이 없어야 하므로(은행 export의 반올림 잔여값 등으로 소수점이 붙는 경우가 있음) 정수로 반올림한다.
-                      const amount = Math.round(Math.abs(amountCell));
 
                       if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
                         if (!newFree.some(f => f.name === name)) {
@@ -1426,11 +1445,12 @@ ${question}`;
                     }
                     const liabNameCell = liabNameCol !== undefined ? row[liabNameCol] : undefined;
                     const liabAmountCell = liabAmountCol !== undefined ? row[liabAmountCol] : undefined;
+                    const liabAmount = parseAssetAmountCell(liabAmountCell);
                     if (
-                      typeof liabAmountCell === "number" &&
+                      liabAmount !== null &&
                       ((typeof liabNameCell === "string" && (liabNameCell.includes("주택담보대출") || liabNameCell.includes("주담대"))) || currentLiabCategory.includes("장기대출"))
                     ) {
-                      mortgageAmount = Math.abs(liabAmountCell);
+                      mortgageAmount = liabAmount;
                     }
                   }
                 }
