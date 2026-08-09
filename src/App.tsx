@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   Home, 
   DollarSign, 
@@ -163,6 +163,9 @@ export default function App() {
   const [ledgerFileName, setLedgerFileName] = useState<string | null>(null);
   const [assetsFileName, setAssetsFileName] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySyncStatus);
+  const authGateEnabled = isSupabaseConfigured && import.meta.env.PROD;
+  const [cloudDataLoading, setCloudDataLoading] = useState<boolean>(false);
+  const [cloudSaveError, setCloudSaveError] = useState("");
 
   const formatDateLabel = (dateStr: string) => {
     if (!dateStr) return "";
@@ -174,6 +177,7 @@ export default function App() {
   };
   
   const [ledger, setLedger] = useState<LedgerItem[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_LEDGER") || localStorage.getItem(" VIVALDI_LEDGER");
     if (saved) {
       try {
@@ -188,6 +192,7 @@ export default function App() {
   });
 
   const [checklist, setChecklist] = useState<ChecklistItem[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_CHECKLIST_V2");
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { /* ignore */ }
@@ -196,6 +201,7 @@ export default function App() {
   });
 
   const [mortgagePayments, setMortgagePayments] = useState<MortgagePayment[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_MORTGAGE_PAYMENTS");
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { /* ignore */ }
@@ -223,6 +229,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginSubmitting, setLoginSubmitting] = useState(false);
+  const hasLoadedCloudDataRef = useRef(false);
 
   // 비밀번호를 잊었을 때: 이메일로 재설정 링크 발송
   const [forgotEmail, setForgotEmail] = useState("");
@@ -248,6 +255,9 @@ export default function App() {
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
       setSession(newSession);
+      if (!newSession) {
+        hasLoadedCloudDataRef.current = false;
+      }
       // 이메일의 재설정 링크를 클릭해서 돌아오면 Supabase가 이 이벤트를 발생시킨다.
       if (event === "PASSWORD_RECOVERY") {
         setAuthView("reset");
@@ -315,8 +325,12 @@ export default function App() {
 
   // --- 0b. SUPABASE DATA SYNC (영구 저장 + 부부간 실시간 공유) ---
   useEffect(() => {
-    if (!supabase || !session) return;
+    if (!supabase || !session) {
+      setCloudDataLoading(false);
+      return;
+    }
     let cancelled = false;
+    setCloudDataLoading(authGateEnabled && !hasLoadedCloudDataRef.current);
 
     // Supabase(PostgREST)는 한 번에 최대 1000행만 돌려준다 - 원장처럼 1000건이 넘는 테이블은
     // range()로 계속 이어받아야 뒤쪽 데이터가 잘리지 않는다.
@@ -353,25 +367,19 @@ export default function App() {
       ]);
       if (cancelled) return;
 
-      if (ledgerRows.length > 0) {
-        setLedger(ledgerRows.map((r: any) => ({
-          id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
-          amount: Number(r.amount), active: r.active, date: r.date,
-          memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
-        })));
-      }
-      if (freeRows.length > 0) {
-        // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
-        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
-      }
-      if (investRows.length > 0) {
-        setInvestmentAssets(investRows.map((r: any) => ({
-          name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
-        })));
-      }
-      if (checklistRows.length > 0) {
-        setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
-      }
+      setLedger(ledgerRows.map((r: any) => ({
+        id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
+        amount: Number(r.amount), active: r.active, date: r.date,
+        memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
+      })));
+      // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
+      setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
+      setSavingsAssets([]);
+      setElectronicAssets([]);
+      setInvestmentAssets(investRows.map((r: any) => ({
+        name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
+      })));
+      setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
       setMortgagePayments(paymentsRows.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
       if (settingsRes.data) {
         LIABILITY_MORTGAGE.name = settingsRes.data.mortgage_name;
@@ -379,9 +387,14 @@ export default function App() {
         LIABILITY_MORTGAGE.rate = Number(settingsRes.data.mortgage_rate);
         if (settingsRes.data.mortgage_start_date) LIABILITY_MORTGAGE.startDate = settingsRes.data.mortgage_start_date;
         if (settingsRes.data.mortgage_end_date) LIABILITY_MORTGAGE.endDate = settingsRes.data.mortgage_end_date;
-        if (settingsRes.data.ledger_file_name) setLedgerFileName(settingsRes.data.ledger_file_name);
-        if (settingsRes.data.assets_file_name) setAssetsFileName(settingsRes.data.assets_file_name);
+        setLedgerFileName(settingsRes.data.ledger_file_name || null);
+        setAssetsFileName(settingsRes.data.assets_file_name || null);
+      } else {
+        setLedgerFileName(null);
+        setAssetsFileName(null);
       }
+      hasLoadedCloudDataRef.current = true;
+      setCloudDataLoading(false);
     };
 
     fetchAll();
@@ -616,6 +629,7 @@ export default function App() {
 
   // --- 2a. STATEFUL ASSETS FOR BULK UPLOAD AND PERSISTENCE ---
   const [freeAssets, setFreeAssets] = useState<{ name: string; amount: number }[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_FREE_ASSETS");
     if (saved) {
       try {
@@ -629,6 +643,7 @@ export default function App() {
   });
 
   const [savingsAssets, setSavingsAssets] = useState<{ name: string; amount: number }[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_SAVINGS_ASSETS");
     if (saved) {
       try {
@@ -642,6 +657,7 @@ export default function App() {
   });
 
   const [electronicAssets, setElectronicAssets] = useState<{ name: string; amount: number }[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_ELECTRONIC_ASSETS");
     if (saved) {
       try {
@@ -655,6 +671,7 @@ export default function App() {
   });
 
   const [investmentAssets, setInvestmentAssets] = useState<InvestmentItem[]>(() => {
+    if (authGateEnabled) return [];
     const saved = localStorage.getItem("VIVALDI_INVESTMENT_ASSETS");
     if (saved) {
       try {
@@ -667,7 +684,11 @@ export default function App() {
     return ASSET_INVESTMENTS;
   });
 
+  const freeAssetsRef = useRef(freeAssets);
+  const investmentAssetsRef = useRef(investmentAssets);
+
   useEffect(() => {
+    freeAssetsRef.current = freeAssets;
     localStorage.setItem("VIVALDI_FREE_ASSETS", JSON.stringify(freeAssets));
   }, [freeAssets]);
 
@@ -680,6 +701,7 @@ export default function App() {
   }, [electronicAssets]);
 
   useEffect(() => {
+    investmentAssetsRef.current = investmentAssets;
     localStorage.setItem("VIVALDI_INVESTMENT_ASSETS", JSON.stringify(investmentAssets));
   }, [investmentAssets]);
 
@@ -1086,7 +1108,7 @@ ${question}`;
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
@@ -1274,11 +1296,13 @@ ${question}`;
             }
           }
 
-          syncLedgerReplaceToSupabase(uniqueItems).then(ok => {
-            if (!ok) {
-              alert("⚠️ 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
-            }
-          });
+          const cloudOk = await syncLedgerReplaceToSupabase(uniqueItems);
+          if (!cloudOk) {
+            setCloudSaveError("클라우드 저장에 실패했습니다.");
+            alert("클라우드 저장에 실패했습니다.");
+          } else {
+            setCloudSaveError("");
+          }
           updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
 
           alert(`🎉 수입/지출 내역 ${uniqueItems.length}건이 성공적으로 연동되었습니다!`);
@@ -1321,11 +1345,13 @@ ${question}`;
     setSavingsAssets([]);
     setElectronicAssets([]);
     setInvestmentAssets([]);
+    freeAssetsRef.current = [];
+    investmentAssetsRef.current = [];
     setAssetsFileName(null);
 
     files.forEach((file) => {
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
@@ -1637,23 +1663,29 @@ ${question}`;
 
         if (anySheetParsed) {
           const finalInvestments = Array.from(combinedInvestMap.values());
-          setFreeAssets(prev => {
-            const merged = [...prev];
-            combinedFree.forEach(item => {
-              if (!merged.some(existing => existing.name === item.name)) merged.push(item);
-            });
-            return merged;
+          const nextFreeAssets = [...freeAssetsRef.current];
+          combinedFree.forEach(item => {
+            if (!nextFreeAssets.some(existing => existing.name === item.name)) nextFreeAssets.push(item);
           });
+          freeAssetsRef.current = nextFreeAssets;
+          setFreeAssets(nextFreeAssets);
           setSavingsAssets([]);
           setElectronicAssets([]);
-          setInvestmentAssets(prev => {
-            const merged = new Map(prev.map(item => [item.name, item]));
-            finalInvestments.forEach(item => merged.set(item.name, item));
-            return Array.from(merged.values());
-          });
+          const nextInvestmentsMap = new Map(investmentAssetsRef.current.map(item => [item.name, item]));
+          finalInvestments.forEach(item => nextInvestmentsMap.set(item.name, item));
+          const nextInvestmentAssets = Array.from(nextInvestmentsMap.values());
+          investmentAssetsRef.current = nextInvestmentAssets;
+          setInvestmentAssets(nextInvestmentAssets);
           if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
           if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
           setAssetsFileName(prev => prev ? `${prev}, ${file.name}` : file.name);
+          const cloudOk = await syncAssetsReplaceToSupabase(nextFreeAssets, nextInvestmentAssets);
+          if (!cloudOk) {
+            setCloudSaveError("클라우드 저장에 실패했습니다.");
+            alert("클라우드 저장에 실패했습니다.");
+          } else {
+            setCloudSaveError("");
+          }
           updateHouseholdSettingsInSupabase({
             assets_file_name: files.map(f => f.name).join(", "),
             ...(combinedMortgageAmount ? { mortgage_amount: combinedMortgageAmount } : {}),
@@ -1827,9 +1859,8 @@ ${question}`;
   };
 
   // --- SUPABASE AUTH GATE ---
-  const authGateEnabled = false;
 
-  if (authGateEnabled && isSupabaseConfigured && authLoading) {
+  if (authGateEnabled && (authLoading || cloudDataLoading)) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center">
         <div className="text-slate-400 text-sm font-bold animate-pulse">불러오는 중...</div>
@@ -1838,7 +1869,7 @@ ${question}`;
   }
 
   // 이메일의 재설정 링크를 클릭해서 돌아온 경우: 세션이 있어도(임시 복구 세션) 새 비밀번호 설정 화면을 먼저 보여준다.
-  if (authGateEnabled && isSupabaseConfigured && authView === "reset") {
+  if (authGateEnabled && authView === "reset") {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="reset_password_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
@@ -1894,7 +1925,7 @@ ${question}`;
     );
   }
 
-  if (authGateEnabled && isSupabaseConfigured && !session) {
+  if (authGateEnabled && !session) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
@@ -2074,6 +2105,11 @@ ${question}`;
               </span>
             </div>
           </div>
+          {cloudSaveError && (
+            <div className="text-[11px] font-bold text-rose-200 bg-rose-950/60 border border-rose-800 rounded-lg px-3 py-2">
+              {cloudSaveError}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2 mt-2">
             <button
@@ -3044,7 +3080,9 @@ ${question}`;
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="income_items_list">
                     {getLedgerItemsForDisplay("수입").length === 0 ? (
-                       <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 수입 내역이 없습니다.</div>
+                       <div className="text-center py-12 text-slate-400 text-xs">
+                         {ledger.length === 0 ? "등록된 가계부 데이터가 없습니다. 엑셀 파일을 업로드해 주세요." : "선택한 범위에 수입 내역이 없습니다."}
+                       </div>
                     ) : (
                       groupLedgerItemsForDisplay(
                         getLedgerItemsForDisplay("수입")
@@ -3150,7 +3188,9 @@ ${question}`;
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="expense_items_list">
                     {getLedgerItemsForDisplay("지출").length === 0 ? (
-                      <div className="text-center py-12 text-slate-400 text-xs">선택한 범위에 지출 내역이 없습니다.</div>
+                      <div className="text-center py-12 text-slate-400 text-xs">
+                        {ledger.length === 0 ? "등록된 가계부 데이터가 없습니다. 엑셀 파일을 업로드해 주세요." : "선택한 범위에 지출 내역이 없습니다."}
+                      </div>
                     ) : (
                       groupLedgerItemsForDisplay(
                         getLedgerItemsForDisplay("지출")
