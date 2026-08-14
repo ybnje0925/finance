@@ -1336,9 +1336,26 @@ ${question}`;
 
     const getOwnerTagFromFileName = (name: string) => {
       const upper = name.toUpperCase();
-      if (upper.includes("[JE]")) return "[재은] ";
-      if (upper.includes("[YB]")) return "[영범] ";
+      if (upper.includes("[JE]") || /(^|[^A-Z0-9])JE([^A-Z0-9]|$)/.test(upper) || upper.includes("JAEEUN") || name.includes("재은")) return "[재은] ";
+      if (upper.includes("[YB]") || /(^|[^A-Z0-9])YB([^A-Z0-9]|$)/.test(upper) || upper.includes("YOUNGBEOM") || name.includes("영범")) return "[영범] ";
       return "";
+    };
+
+    const normalizeAssetKey = (name: string) => name.replace(/\s+/g, "").toLowerCase();
+    const pushUniqueFreeAsset = (items: typeof ASSET_FREE_DEPOSITS, name: string, amount: number) => {
+      if (amount <= 0) return;
+      if (items.some(item => normalizeAssetKey(item.name) === normalizeAssetKey(name) && item.amount === amount)) return;
+      if (!items.some(item => normalizeAssetKey(item.name) === normalizeAssetKey(name))) {
+        items.push({ name, amount });
+        return;
+      }
+      let suffix = 2;
+      let uniqueName = `${name} (${suffix})`;
+      while (items.some(item => normalizeAssetKey(item.name) === normalizeAssetKey(uniqueName))) {
+        suffix += 1;
+        uniqueName = `${name} (${suffix})`;
+      }
+      items.push({ name: uniqueName, amount });
     };
 
     setFreeAssets([]);
@@ -1451,12 +1468,10 @@ ${question}`;
                     if (typeof nameCell === "string" && nameCell.trim().length > 0 && amount !== null) {
                       const name = ownerTag + nameCell.trim();
 
-                      if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
-                        if (!newFree.some(f => f.name === name)) {
-                          newFree.push({ name, amount });
-                        }
+                      if (amount > 0 && (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융"))) {
+                        pushUniqueFreeAsset(newFree, name, amount);
                       } else if (currentCategory.includes("투자성") || currentCategory.includes("주식")) {
-                        if (!investMap.has(name)) {
+                        if (amount > 0 && !investMap.has(name)) {
                           investMap.set(name, { name, principal: amount, appraised: amount, yieldRate: 0 });
                         }
                       }
@@ -1509,7 +1524,9 @@ ${question}`;
                     const yieldRate = typeof rawYield === "number"
                       ? Math.round(rawYield * 100) / 100
                       : (principalVal !== 0 ? Math.round(((appraisedVal - principalVal) / principalVal) * 10000) / 100 : 0);
-                    investMap.set(name, { name, principal: Math.round(Math.abs(principalVal)), appraised: Math.round(Math.abs(appraisedVal)), yieldRate });
+                    if (Math.abs(appraisedVal) > 0) {
+                      investMap.set(name, { name, principal: Math.round(Math.abs(principalVal)), appraised: Math.round(Math.abs(appraisedVal)), yieldRate });
+                    }
                   }
                 }
                 break;
@@ -1546,9 +1563,7 @@ ${question}`;
               if (assetHeaderRowIdx !== -1) {
                 newInvestments.push(...Array.from(investMap.values()));
 
-                newFree.forEach(f => {
-                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
-                });
+                newFree.forEach(f => pushUniqueFreeAsset(combinedFree, f.name, f.amount));
                 newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
                 if (mortgageAmount) combinedMortgageAmount = mortgageAmount;
                 if (mortgageRate) combinedMortgageRate = mortgageRate;
@@ -1631,28 +1646,26 @@ ${question}`;
                 if (typeStr.includes("입출금") || typeStr.includes("자유") || typeStr.includes("현금") || typeStr.includes("free") || typeStr.includes("cash") || typeStr.includes("적금") || typeStr.includes("예금") || typeStr.includes("저축") || typeStr.includes("savings") || typeStr.includes("전자") || typeStr.includes("페이") || typeStr.includes("간편") || typeStr.includes("pay") || typeStr.includes("electronic")) {
                   const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
                   if (isInvestmentName) {
-                    newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
-                  } else {
-                    newFree.push({ name, amount });
-                  }
-                } else if (typeStr.includes("주식") || typeStr.includes("투자") || typeStr.includes("펀드") || typeStr.includes("증권") || typeStr.includes("stock") || typeStr.includes("investment")) {
-                  const rawYield = findVal(["수익률", "수익", "yield", "rate"]);
-                  const yieldRate = rawYield !== undefined ? parseFloat(String(rawYield).replace(/[^0-9.-]/g, "")) || 0 : 0;
-                  newInvestments.push({ name, principal: amount, appraised: amount, yieldRate });
+                  if (amount > 0) newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
+                } else {
+                  pushUniqueFreeAsset(newFree, name, amount);
+                }
+              } else if (typeStr.includes("주식") || typeStr.includes("투자") || typeStr.includes("펀드") || typeStr.includes("증권") || typeStr.includes("stock") || typeStr.includes("investment")) {
+                const rawYield = findVal(["수익률", "수익", "yield", "rate"]);
+                const yieldRate = rawYield !== undefined ? parseFloat(String(rawYield).replace(/[^0-9.-]/g, "")) || 0 : 0;
+                  if (amount > 0) newInvestments.push({ name, principal: amount, appraised: amount, yieldRate });
                 } else {
                   const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
                   if (isInvestmentName) {
-                    newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
+                    if (amount > 0) newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
                   } else {
-                    newFree.push({ name, amount });
+                    pushUniqueFreeAsset(newFree, name, amount);
                   }
                 }
               });
 
               if (newFree.length > 0 || newInvestments.length > 0) {
-                newFree.forEach(f => {
-                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
-                });
+                newFree.forEach(f => pushUniqueFreeAsset(combinedFree, f.name, f.amount));
                 newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
                 assetsSuccessCount += (newFree.length + newInvestments.length);
                 anySheetParsed = true;
@@ -1664,9 +1677,7 @@ ${question}`;
         if (anySheetParsed) {
           const finalInvestments = Array.from(combinedInvestMap.values());
           const nextFreeAssets = [...freeAssetsRef.current];
-          combinedFree.forEach(item => {
-            if (!nextFreeAssets.some(existing => existing.name === item.name)) nextFreeAssets.push(item);
-          });
+          combinedFree.forEach(item => pushUniqueFreeAsset(nextFreeAssets, item.name, item.amount));
           freeAssetsRef.current = nextFreeAssets;
           setFreeAssets(nextFreeAssets);
           setSavingsAssets([]);
@@ -2821,7 +2832,7 @@ ${question}`;
                 <div className="bg-indigo-50 border border-indigo-100 rounded-2xl px-4 py-3">
                   <p className="text-xs font-bold text-indigo-700">Gemini 자동 연결</p>
                   <p className="text-[11px] text-indigo-500 mt-0.5">
-                    브라우저 키 입력 없이 Vercel 환경변수 GEMINI_API_KEY로 gemini-2.5-flash를 호출합니다.
+                    브라우저 키 입력 없이 Vercel 환경변수 GEMINI_API_KEY로 gemini-3.6-flash를 호출합니다.
                   </p>
                 </div>
 

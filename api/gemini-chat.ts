@@ -28,7 +28,7 @@ export default async function handler(req: any, res: any) {
   try {
     const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
       contents: prompt
     });
     res.status(200).json({ text: response.text || "" });

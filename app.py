@@ -320,7 +320,7 @@ def chat() -> Any:
     )
 
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-3.6-flash"))
     response = model.generate_content(prompt)
     return jsonify({"answer": getattr(response, "text", "") or "답변을 생성하지 못했습니다."})
 
