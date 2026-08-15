@@ -606,6 +606,7 @@ export default function App() {
     electronic: false,
     investment: false
   });
+  const [assetSortMode, setAssetSortMode] = useState<"amountDesc" | "amountAsc" | "nameAsc">("amountDesc");
 
   const isDummyAsset = (name: string) => {
     const dummyKeywords = [
@@ -725,11 +726,18 @@ export default function App() {
   const normalizeAssetName = (name: string) => stripAssetOwnerTag(name).replace(/\s+/g, "").toLowerCase();
   const dedupeFreeAssets = (items: { name: string; amount: number }[]) => {
     const byKey = new Map<string, { name: string; amount: number }>();
+    const taggedBaseAmountKeys = new Set(
+      items
+        .filter(item => item?.name && parseAssetOwner(item.name) !== "미지정")
+        .map(item => `${normalizeAssetName(item.name)}|${Math.round(Number(item.amount))}`)
+    );
     items.forEach(item => {
       const amount = Math.round(Number(item.amount));
       if (!item.name || !Number.isFinite(amount) || amount <= 0) return;
       const owner = parseAssetOwner(item.name);
-      const key = `${normalizeAssetName(item.name)}|${amount}`;
+      const baseAmountKey = `${normalizeAssetName(item.name)}|${amount}`;
+      if (owner === "미지정" && taggedBaseAmountKeys.has(baseAmountKey)) return;
+      const key = `${owner}|${baseAmountKey}`;
       const existing = byKey.get(key);
       if (!existing || (parseAssetOwner(existing.name) === "미지정" && owner !== "미지정")) {
         byKey.set(key, { name: item.name, amount });
@@ -739,12 +747,19 @@ export default function App() {
   };
   const dedupeInvestmentAssets = (items: InvestmentItem[]) => {
     const byKey = new Map<string, InvestmentItem>();
+    const taggedBaseAmountKeys = new Set(
+      items
+        .filter(item => item?.name && parseAssetOwner(item.name) !== "미지정")
+        .map(item => `${normalizeAssetName(item.name)}|${Math.round(Number(item.appraised))}`)
+    );
     items.forEach(item => {
       const principal = Math.round(Number(item.principal));
       const appraised = Math.round(Number(item.appraised));
       if (!item.name || !Number.isFinite(appraised) || appraised <= 0) return;
       const owner = parseAssetOwner(item.name);
-      const key = `${normalizeAssetName(item.name)}|${appraised}`;
+      const baseAmountKey = `${normalizeAssetName(item.name)}|${appraised}`;
+      if (owner === "미지정" && taggedBaseAmountKeys.has(baseAmountKey)) return;
+      const key = `${owner}|${baseAmountKey}`;
       const existing = byKey.get(key);
       if (!existing || (parseAssetOwner(existing.name) === "미지정" && owner !== "미지정")) {
         byKey.set(key, { ...item, principal, appraised, yieldRate: Number(item.yieldRate) || 0 });
@@ -822,6 +837,104 @@ export default function App() {
   const bestInvestment = investmentAssets.length > 0
     ? investmentAssets.reduce((best, item) => (item.yieldRate > best.yieldRate ? item : best), investmentAssets[0])
     : null;
+  const assetSortLabel = assetSortMode === "amountDesc" ? "금액 높은순" : assetSortMode === "amountAsc" ? "금액 낮은순" : "이름순";
+  const compareAssetRows = <T extends { name: string }>(a: { item: T; value: number }, b: { item: T; value: number }) => {
+    if (assetSortMode === "amountAsc") return a.value - b.value;
+    if (assetSortMode === "nameAsc") return stripAssetOwnerTag(a.item.name).localeCompare(stripAssetOwnerTag(b.item.name), "ko");
+    return b.value - a.value;
+  };
+  const freeRowsByOwner = (owner: "영범" | "재은") =>
+    freeAssets
+      .map((item, index) => ({ item, index, value: item.amount }))
+      .filter(row => parseAssetOwner(row.item.name) === owner)
+      .sort(compareAssetRows);
+  const investmentRowsByOwner = (owner: "영범" | "재은") =>
+    investmentAssets
+      .map((item, index) => ({ item, index, value: item.appraised }))
+      .filter(row => parseAssetOwner(row.item.name) === owner)
+      .sort(compareAssetRows);
+  const freeOwnerTotals = {
+    youngbeom: freeRowsByOwner("영범").reduce((sum, row) => sum + row.item.amount, 0),
+    jaeeun: freeRowsByOwner("재은").reduce((sum, row) => sum + row.item.amount, 0)
+  };
+  const investmentOwnerTotals = {
+    youngbeom: investmentRowsByOwner("영범").reduce((sum, row) => sum + row.item.appraised, 0),
+    jaeeun: investmentRowsByOwner("재은").reduce((sum, row) => sum + row.item.appraised, 0)
+  };
+  const renderFreeOwnerColumn = (owner: "영범" | "재은", rows: ReturnType<typeof freeRowsByOwner>) => (
+    <div className="bg-white/5 rounded-xl border border-white/5 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-white/5 border-b border-white/5">
+        <span className="text-[10px] font-bold text-emerald-300">{owner}</span>
+        <span className="text-[10px] font-mono text-white">
+          {rows.reduce((sum, row) => sum + row.item.amount, 0).toLocaleString()}원
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto">
+        {rows.length === 0 ? (
+          <div className="px-3 py-4 text-center text-[10px] text-slate-500">등록된 자산이 없습니다.</div>
+        ) : rows.map(({ item, index }) => (
+          <div key={`${item.name}-${index}`} className="px-3 py-2 border-b border-white/5 last:border-0">
+            <div className="flex justify-between items-center gap-2">
+              <span className="truncate max-w-[150px]" title={stripAssetOwnerTag(item.name)}>{stripAssetOwnerTag(item.name)}</span>
+              <span className="shrink-0 text-white">{item.amount.toLocaleString()}원</span>
+            </div>
+            <select
+              value={parseAssetOwner(item.name)}
+              onChange={(e) => handleSetFreeAssetOwner(index, e.target.value)}
+              className="mt-1 bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+              title="계좌 명의 지정"
+            >
+              {ASSET_OWNER_OPTIONS.map(o => (
+                <option key={o} value={o} className="text-slate-900">{o}</option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+  const renderInvestmentOwnerColumn = (owner: "영범" | "재은", rows: ReturnType<typeof investmentRowsByOwner>) => (
+    <div className="bg-white/5 rounded-xl border border-white/5 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-white/5 border-b border-white/5">
+        <span className="text-[10px] font-bold text-emerald-300">{owner}</span>
+        <span className="text-[10px] font-mono text-white">
+          {rows.reduce((sum, row) => sum + row.item.appraised, 0).toLocaleString()}원
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto">
+        {rows.length === 0 ? (
+          <div className="px-3 py-4 text-center text-[10px] text-slate-500">등록된 투자자산이 없습니다.</div>
+        ) : rows.map(({ item, index }) => {
+          const isStock = item.yieldRate !== 0;
+          return (
+            <div key={`${item.name}-${index}`} className="px-3 py-2 border-b border-white/5 last:border-0">
+              <div className="flex justify-between items-center gap-2">
+                <span className="truncate max-w-[140px]" title={stripAssetOwnerTag(item.name)}>{stripAssetOwnerTag(item.name)}</span>
+                <div className="text-right shrink-0 text-white">
+                  <span>{item.appraised.toLocaleString()}원</span>
+                  {isStock && (
+                    <span className={`text-[8px] ml-1 ${item.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      ({item.yieldRate >= 0 ? "+" : ""}{item.yieldRate}%)
+                    </span>
+                  )}
+                </div>
+              </div>
+              <select
+                value={parseAssetOwner(item.name)}
+                onChange={(e) => handleSetInvestmentAssetOwner(index, e.target.value)}
+                className="mt-1 bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                title="계좌 명의 지정"
+              >
+                {ASSET_OWNER_OPTIONS.map(o => (
+                  <option key={o} value={o} className="text-slate-900">{o}</option>
+                ))}
+              </select>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 
   // Active ledger items for calculation
   const getMonthlyIncomes = (m: string) => {
@@ -1369,8 +1482,9 @@ ${question}`;
 
     const getOwnerTagFromFileName = (name: string) => {
       const upper = name.toUpperCase();
-      if (upper.includes("JE") || upper.includes("JAEEUN") || name.includes("재은")) return "[재은] ";
-      if (upper.includes("YB") || upper.includes("YOUNGBEOM") || name.includes("영범")) return "[영범] ";
+      const normalized = upper.replace(/[^A-Z0-9가-힣]/g, "");
+      if (normalized.includes("JE") || normalized.includes("JAEEUN") || name.includes("재은")) return "[재은] ";
+      if (normalized.includes("YB") || normalized.includes("YOUNGBEOM") || name.includes("영범")) return "[영범] ";
       return "";
     };
 
@@ -3788,28 +3902,28 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.free && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {freeAssets
-                              .map((acc, idx) => ({ acc, idx }))
-                              .sort((a, b) => b.acc.amount - a.acc.amount)
-                              .map(({ acc, idx }) => (
-                              <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                <div className="flex justify-between items-center gap-2">
-                                  <span className="truncate max-w-[130px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                  <span className="shrink-0">{acc.amount.toLocaleString()}원</span>
-                                </div>
-                                <select
-                                  value={parseAssetOwner(acc.name)}
-                                  onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
-                                  className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                  title="계좌 명의 지정"
-                                >
-                                  {ASSET_OWNER_OPTIONS.map(o => (
-                                    <option key={o} value={o} className="text-slate-900">{o}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            ))}
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[9px] text-slate-500">정렬: {assetSortLabel}</span>
+                              <select
+                                value={assetSortMode}
+                                onChange={(e) => setAssetSortMode(e.target.value as typeof assetSortMode)}
+                                className="bg-white/10 border border-white/10 rounded px-2 py-1 text-[9px] text-emerald-300 cursor-pointer focus:outline-none"
+                                title="자산 정렬 방식"
+                              >
+                                <option value="amountDesc" className="text-slate-900">금액 높은순</option>
+                                <option value="amountAsc" className="text-slate-900">금액 낮은순</option>
+                                <option value="nameAsc" className="text-slate-900">이름순</option>
+                              </select>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {renderFreeOwnerColumn("영범", freeRowsByOwner("영범"))}
+                              {renderFreeOwnerColumn("재은", freeRowsByOwner("재은"))}
+                            </div>
+                            <div className="flex items-center justify-between bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2 text-white">
+                              <span className="font-bold">합산</span>
+                              <span>{(freeOwnerTotals.youngbeom + freeOwnerTotals.jaeeun).toLocaleString()}원</span>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -3829,38 +3943,28 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.investment && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {investmentAssets
-                              .map((acc, idx) => ({ acc, idx }))
-                              .sort((a, b) => b.acc.appraised - a.acc.appraised)
-                              .map(({ acc, idx }) => {
-                              const isStock = acc.yieldRate !== 0;
-                              return (
-                                <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                  <div className="flex justify-between items-center gap-2">
-                                    <span className="truncate max-w-[110px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                    <div className="text-right shrink-0">
-                                      <span>{acc.appraised.toLocaleString()}원</span>
-                                      {isStock && (
-                                        <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                          ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <select
-                                    value={parseAssetOwner(acc.name)}
-                                    onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
-                                    className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                    title="계좌 명의 지정"
-                                  >
-                                    {ASSET_OWNER_OPTIONS.map(o => (
-                                      <option key={o} value={o} className="text-slate-900">{o}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                              );
-                            })}
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[9px] text-slate-500">정렬: {assetSortLabel}</span>
+                              <select
+                                value={assetSortMode}
+                                onChange={(e) => setAssetSortMode(e.target.value as typeof assetSortMode)}
+                                className="bg-white/10 border border-white/10 rounded px-2 py-1 text-[9px] text-emerald-300 cursor-pointer focus:outline-none"
+                                title="자산 정렬 방식"
+                              >
+                                <option value="amountDesc" className="text-slate-900">금액 높은순</option>
+                                <option value="amountAsc" className="text-slate-900">금액 낮은순</option>
+                                <option value="nameAsc" className="text-slate-900">이름순</option>
+                              </select>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {renderInvestmentOwnerColumn("영범", investmentRowsByOwner("영범"))}
+                              {renderInvestmentOwnerColumn("재은", investmentRowsByOwner("재은"))}
+                            </div>
+                            <div className="flex items-center justify-between bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2 text-white">
+                              <span className="font-bold">합산</span>
+                              <span>{(investmentOwnerTotals.youngbeom + investmentOwnerTotals.jaeeun).toLocaleString()}원</span>
+                            </div>
                           </div>
                         )}
                       </div>
