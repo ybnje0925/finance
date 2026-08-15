@@ -1,0 +1,11 @@
+# Local sample data and maintenance scripts are not needed by the Vercel build/runtime.
+dist/
+.claude/
+*.xlsx
+app.py
+upload_to_supabase.py
+requirements.txt
+schema.sql
+supabase/
+README.md
+metadata.json

@@ -4,10 +4,10 @@
  */
 
 import React, { useState, useEffect, useRef } from "react";
-import { 
-  Home, 
-  DollarSign, 
-  TrendingUp, 
+import {
+  Home,
+  DollarSign,
+  TrendingUp,
   CheckSquare, 
   CreditCard,
   Trash2,
@@ -26,7 +26,6 @@ import {
   BarChart2,
   Search
 } from "lucide-react";
-import { read, utils } from "xlsx";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { emptySyncStatus, type SyncStatus } from "./remoteFinance";
@@ -1143,6 +1142,7 @@ ${question}`;
     const reader = new FileReader();
     reader.onload = async (evt) => {
       try {
+        const { read, utils } = await import("xlsx");
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
 
@@ -1155,7 +1155,7 @@ ${question}`;
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
-          const rows = utils.sheet_to_json<any[]>(ws, { header: 1 });
+          const rows = utils.sheet_to_json(ws, { header: 1 }) as any[][];
           if (!rows || rows.length === 0) continue;
 
           let headerRowIdx = -1;
@@ -1351,7 +1351,7 @@ ${question}`;
   };
 
   const handleAssetsExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const files = Array.from(e.target.files || []) as File[];
     if (files.length === 0) return;
 
     const parseAssetAmountCell = (value: unknown) => {
@@ -1410,6 +1410,7 @@ ${question}`;
     const reader = new FileReader();
     reader.onload = async (evt) => {
       try {
+        const { read, utils } = await import("xlsx");
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
 
@@ -1427,7 +1428,7 @@ ${question}`;
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
-          const rows = utils.sheet_to_json<any[]>(ws, { header: 1 });
+          const rows = utils.sheet_to_json(ws, { header: 1 }) as any[][];
           if (!rows || rows.length === 0) continue;
 
           const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
@@ -1615,7 +1616,7 @@ ${question}`;
             }
 
             if (!parsedStructured) {
-              const rawData = utils.sheet_to_json<any>(ws);
+              const rawData = utils.sheet_to_json(ws) as any[];
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newInvestments: typeof ASSET_INVESTMENTS = [];
 
@@ -1723,7 +1724,7 @@ ${question}`;
           setFreeAssets(nextFreeAssets);
           setSavingsAssets([]);
           setElectronicAssets([]);
-          const nextInvestmentsMap = new Map(investmentAssetsRef.current.map(item => [item.name, item]));
+          const nextInvestmentsMap = new Map<string, InvestmentItem>(investmentAssetsRef.current.map(item => [item.name, item]));
           finalInvestments.forEach(item => nextInvestmentsMap.set(item.name, item));
           const nextInvestmentAssets = dedupeInvestmentAssets(Array.from(nextInvestmentsMap.values()));
           investmentAssetsRef.current = nextInvestmentAssets;
@@ -4314,14 +4315,14 @@ ${question}`;
                 const variableExpense = Math.max(0, totalExpenseAll - fixedExpense);
                 const fixedRatio = totalExpenseAll > 0 ? (fixedExpense / totalExpenseAll) * 100 : 0;
                 const variableRatio = totalExpenseAll > 0 ? (variableExpense / totalExpenseAll) * 100 : 0;
-                const topExpenseCategory = Object.entries(
+                const topExpenseCategory = (Object.entries(
                   activeLedger
                     .filter(item => item.type === "지출")
                     .reduce((acc, item) => {
                       acc[item.category] = (acc[item.category] || 0) + item.amount;
                       return acc;
                     }, {} as Record<string, number>)
-                ).sort((a, b) => b[1] - a[1])[0];
+                ) as [string, number][]).sort((a, b) => b[1] - a[1])[0];
                 const diagnosis =
                   expenseRatio >= 80
                     ? "수입 대비 지출 비중이 높습니다. 반복 결제와 고정비를 먼저 낮춰야 현금흐름 개선 효과가 큽니다."
