@@ -373,12 +373,13 @@ export default function App() {
         memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
       })));
       // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
-      setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
+      // 과거 업로드에서 중복 저장된 같은 계좌/금액 row는 화면과 합계에서 제거한다.
+      setFreeAssets(dedupeFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) }))));
       setSavingsAssets([]);
       setElectronicAssets([]);
-      setInvestmentAssets(investRows.map((r: any) => ({
+      setInvestmentAssets(dedupeInvestmentAssets(investRows.map((r: any) => ({
         name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
-      })));
+      }))));
       setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
       setMortgagePayments(paymentsRows.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
       if (settingsRes.data) {
@@ -462,13 +463,15 @@ export default function App() {
     const { error: delInvError } = await supabase.from("asset_investment_items").delete().gte("id", 0);
     logSupabaseError("투자 자산 전체 삭제", delInvError);
     ok = ok && !delInvError;
-    if (free.length > 0) {
-      const { error } = await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
+    const cleanFree = dedupeFreeAssets(free);
+    const cleanInvestments = dedupeInvestmentAssets(investments);
+    if (cleanFree.length > 0) {
+      const { error } = await supabase.from("asset_free_items").insert(cleanFree.map(f => ({ name: f.name, amount: f.amount })));
       logSupabaseError("자유입출금 자산 저장", error);
       ok = ok && !error;
     }
-    if (investments.length > 0) {
-      const { error } = await supabase.from("asset_investment_items").insert(investments.map(i => ({
+    if (cleanInvestments.length > 0) {
+      const { error } = await supabase.from("asset_investment_items").insert(cleanInvestments.map(i => ({
         name: i.name, principal: i.principal, appraised: i.appraised, yield_rate: i.yieldRate
       })));
       logSupabaseError("투자 자산 저장", error);
@@ -720,6 +723,36 @@ export default function App() {
   const ASSET_OWNER_OPTIONS = ["미지정", "영범", "재은", "공동"];
   const parseAssetOwner = (name: string) => name.match(/^\[(.+?)\]\s*/)?.[1] || "미지정";
   const stripAssetOwnerTag = (name: string) => name.replace(/^\[.+?\]\s*/, "");
+  const normalizeAssetName = (name: string) => stripAssetOwnerTag(name).replace(/\s+/g, "").toLowerCase();
+  const dedupeFreeAssets = (items: { name: string; amount: number }[]) => {
+    const byKey = new Map<string, { name: string; amount: number }>();
+    items.forEach(item => {
+      const amount = Math.round(Number(item.amount));
+      if (!item.name || !Number.isFinite(amount) || amount <= 0) return;
+      const owner = parseAssetOwner(item.name);
+      const key = `${normalizeAssetName(item.name)}|${amount}`;
+      const existing = byKey.get(key);
+      if (!existing || (parseAssetOwner(existing.name) === "미지정" && owner !== "미지정")) {
+        byKey.set(key, { name: item.name, amount });
+      }
+    });
+    return Array.from(byKey.values());
+  };
+  const dedupeInvestmentAssets = (items: InvestmentItem[]) => {
+    const byKey = new Map<string, InvestmentItem>();
+    items.forEach(item => {
+      const principal = Math.round(Number(item.principal));
+      const appraised = Math.round(Number(item.appraised));
+      if (!item.name || !Number.isFinite(appraised) || appraised <= 0) return;
+      const owner = parseAssetOwner(item.name);
+      const key = `${normalizeAssetName(item.name)}|${appraised}`;
+      const existing = byKey.get(key);
+      if (!existing || (parseAssetOwner(existing.name) === "미지정" && owner !== "미지정")) {
+        byKey.set(key, { ...item, principal, appraised, yieldRate: Number(item.yieldRate) || 0 });
+      }
+    });
+    return Array.from(byKey.values());
+  };
 
   const handleSetFreeAssetOwner = (index: number, owner: string) => {
     setFreeAssets(prev => {
@@ -1336,8 +1369,15 @@ ${question}`;
 
     const getOwnerTagFromFileName = (name: string) => {
       const upper = name.toUpperCase();
-      if (upper.includes("[JE]") || /(^|[^A-Z0-9])JE([^A-Z0-9]|$)/.test(upper) || upper.includes("JAEEUN") || name.includes("재은")) return "[재은] ";
-      if (upper.includes("[YB]") || /(^|[^A-Z0-9])YB([^A-Z0-9]|$)/.test(upper) || upper.includes("YOUNGBEOM") || name.includes("영범")) return "[영범] ";
+      if (upper.includes("JE") || upper.includes("JAEEUN") || name.includes("재은")) return "[재은] ";
+      if (upper.includes("YB") || upper.includes("YOUNGBEOM") || name.includes("영범")) return "[영범] ";
+      return "";
+    };
+
+    const getOwnerTagFromSheetRows = (rows: any[][]) => {
+      const topCells = rows.slice(0, 8).flat().map(cell => String(cell || "").trim()).filter(Boolean);
+      if (topCells.some(cell => cell.includes("재은"))) return "[재은] ";
+      if (topCells.some(cell => cell.includes("영범"))) return "[영범] ";
       return "";
     };
 
@@ -1395,7 +1435,7 @@ ${question}`;
 
           // 시트 이름이 "현황/자산/재무/뱅샐/고객/asset" 같은 일반 구조 키워드가 아니라면
           // (예: "영범", "재은") 실제 명의로 간주하여 계좌명 앞에 명의 태그를 붙인다.
-          const ownerTag = getOwnerTagFromFileName(file.name) || (isAssetsSheetName ? "" : `[${wsname}] `);
+          const ownerTag = getOwnerTagFromFileName(file.name) || getOwnerTagFromSheetRows(rows) || (isAssetsSheetName ? "" : `[${wsname}] `);
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
             let parsedStructured = false;
@@ -1676,15 +1716,16 @@ ${question}`;
 
         if (anySheetParsed) {
           const finalInvestments = Array.from(combinedInvestMap.values());
-          const nextFreeAssets = [...freeAssetsRef.current];
-          combinedFree.forEach(item => pushUniqueFreeAsset(nextFreeAssets, item.name, item.amount));
+          const mergedFreeAssets = [...freeAssetsRef.current];
+          combinedFree.forEach(item => pushUniqueFreeAsset(mergedFreeAssets, item.name, item.amount));
+          const nextFreeAssets = dedupeFreeAssets(mergedFreeAssets);
           freeAssetsRef.current = nextFreeAssets;
           setFreeAssets(nextFreeAssets);
           setSavingsAssets([]);
           setElectronicAssets([]);
           const nextInvestmentsMap = new Map(investmentAssetsRef.current.map(item => [item.name, item]));
           finalInvestments.forEach(item => nextInvestmentsMap.set(item.name, item));
-          const nextInvestmentAssets = Array.from(nextInvestmentsMap.values());
+          const nextInvestmentAssets = dedupeInvestmentAssets(Array.from(nextInvestmentsMap.values()));
           investmentAssetsRef.current = nextInvestmentAssets;
           setInvestmentAssets(nextInvestmentAssets);
           if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
