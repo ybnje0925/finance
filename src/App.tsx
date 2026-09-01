@@ -23,14 +23,13 @@ import {
   ArrowDownRight,
   Upload,
   PieChart,
-  BarChart2,
-  Search
+  BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
-import { emptySyncStatus, type SyncStatus } from "./remoteFinance";
-import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment } from "./types";
+import { emptySyncStatus, loadRemoteFinanceState, type SyncStatus } from "./remoteFinance";
+import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment, AssetSnapshot } from "./types";
 import { 
   MOVE_IN_DATE,
   HUSBAND,
@@ -44,9 +43,49 @@ import {
   INITIAL_LEDGER 
 } from "./data";
 
+const emptyAssetSnapshot = (): AssetSnapshot => ({
+  freeAssets: [],
+  savingsAssets: [],
+  electronicAssets: [],
+  investmentAssets: [],
+});
+
+const cloneAssetSnapshot = (snapshot: AssetSnapshot): AssetSnapshot => ({
+  freeAssets: snapshot.freeAssets.map(item => ({ ...item })),
+  savingsAssets: snapshot.savingsAssets.map(item => ({ ...item })),
+  electronicAssets: snapshot.electronicAssets.map(item => ({ ...item })),
+  investmentAssets: snapshot.investmentAssets.map(item => ({ ...item })),
+  liability: snapshot.liability ? { ...snapshot.liability } : undefined,
+});
+
+const assetSnapshotTotal = (snapshot: AssetSnapshot) =>
+  snapshot.freeAssets.reduce((sum, item) => sum + item.amount, 0) +
+  snapshot.savingsAssets.reduce((sum, item) => sum + item.amount, 0) +
+  snapshot.electronicAssets.reduce((sum, item) => sum + item.amount, 0) +
+  snapshot.investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
+
+const getAssetSheetMonthKey = (sheetName: string, fallbackYear: number) => {
+  const monthMatch = sheetName.match(/(1[0-2]|0?[1-9])\s*\uC6D4/);
+  if (!monthMatch) return null;
+  const yearMatch = sheetName.match(/(20\d{2})\s*\uB144?/);
+  const year = yearMatch ? Number(yearMatch[1]) : fallbackYear;
+  const month = Number(monthMatch[1]);
+  return `${year}-${String(month).padStart(2, "0")}`;
+};
+
+const getOwnerPrefixFromSheetName = (sheetName: string) => {
+  if (sheetName.includes("\uC601\uBC94")) return "[\uC601\uBC94] ";
+  if (sheetName.includes("\uC7AC\uC740")) return "[\uC7AC\uC740] ";
+  return "";
+};
+
+const formatMonthLabel = (month: string) => {
+  const [year, rawMonth] = month.split("-");
+  return `${year}\uB144 ${String(Number(rawMonth)).padStart(2, "0")}\uC6D4`;
+};
 function DonutChart({ value1, value2, label1, label2, color1 = "stroke-blue-600", color2 = "stroke-amber-500" }: { value1: number; value2: number; label1: string; label2: string; color1?: string; color2?: string }) {
   const total = value1 + value2;
-  if (total === 0) return <div className="text-xs text-slate-400 text-center py-8">ë°ì´í„°ê°€ ì—†ìŠµë‹ˆë‹¤</div>;
+  if (total === 0) return <div className="text-xs text-slate-400 text-center py-8">µ¥ÀÌÅÍ°¡ ¾ø½À´Ï´Ù</div>;
   const pct1 = (value1 / total) * 100;
   const pct2 = (value2 / total) * 100;
   
@@ -71,7 +110,7 @@ function DonutChart({ value1, value2, label1, label2, color1 = "stroke-blue-600"
           )}
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">ê³ ì •ë¹„ ë¹„ìœ¨</span>
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">°íÁ¤ºñ ºñÀ²</span>
           <span className="text-xl font-bold font-mono text-blue-700">{pct1.toFixed(1)}%</span>
         </div>
       </div>
@@ -91,7 +130,7 @@ function DonutChart({ value1, value2, label1, label2, color1 = "stroke-blue-600"
 
 function SVGMultiPieChart({ items }: { items: [string, number][] }) {
   const total = items.reduce((sum, item) => sum + item[1], 0);
-  if (total === 0) return <div className="text-xs text-slate-400 text-center py-8">ë°ì´í„°ê°€ ì—†ìŠµë‹ˆë‹¤</div>;
+  if (total === 0) return <div className="text-xs text-slate-400 text-center py-8">µ¥ÀÌÅÍ°¡ ¾ø½À´Ï´Ù</div>;
   
   const circ = 251.3;
   let currentOffset = 0;
@@ -133,7 +172,7 @@ function SVGMultiPieChart({ items }: { items: [string, number][] }) {
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
           <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Top 5</span>
-          <span className="text-xs text-slate-400 font-bold">ì§€ì¶œ ë¹„ì¤‘</span>
+          <span className="text-xs text-slate-400 font-bold">ÁöÃâ ºñÁß</span>
         </div>
       </div>
       <div className="flex-1 space-y-2 w-full">
@@ -146,7 +185,7 @@ function SVGMultiPieChart({ items }: { items: [string, number][] }) {
                 <span className="text-slate-700 font-bold">{name}</span>
               </div>
               <div className="text-right font-mono text-slate-500">
-                <span className="font-bold text-slate-700 mr-2">{amount.toLocaleString()}ì›</span>
+                <span className="font-bold text-slate-700 mr-2">{amount.toLocaleString()}¿ø</span>
                 <span className="text-[11px] bg-slate-100 px-1.5 py-0.5 rounded font-extrabold">{pct.toFixed(1)}%</span>
               </div>
             </div>
@@ -171,7 +210,7 @@ export default function App() {
     if (!dateStr) return "";
     const parts = dateStr.split("-");
     if (parts.length === 3) {
-      return `${parseInt(parts[1])}ì›” ${parseInt(parts[2])}ì¼`;
+      return `${parseInt(parts[1])}¿ù ${parseInt(parts[2])}ÀÏ`;
     }
     return dateStr;
   };
@@ -221,7 +260,7 @@ export default function App() {
     localStorage.setItem("VIVALDI_MORTGAGE_PAYMENTS", JSON.stringify(mortgagePayments));
   }, [mortgagePayments]);
 
-  // --- 0. SUPABASE AUTH (ë¶€ë¶€ ê³µìœ  ë¡œê·¸ì¸) ---
+  // --- 0. SUPABASE AUTH (ºÎºÎ °øÀ¯ ·Î±×ÀÎ) ---
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
   const [authView, setAuthView] = useState<"login" | "forgot" | "reset">("login");
@@ -231,13 +270,13 @@ export default function App() {
   const [loginSubmitting, setLoginSubmitting] = useState(false);
   const hasLoadedCloudDataRef = useRef(false);
 
-  // ë¹„ë°€ë²ˆí˜¸ë¥¼ ìŠì—ˆì„ ë•Œ: ì´ë©”ì¼ë¡œ ì¬ì„¤ì • ë§í¬ ë°œì†¡
+  // ºñ¹Ğ¹øÈ£¸¦ ÀØ¾úÀ» ¶§: ÀÌ¸ŞÀÏ·Î Àç¼³Á¤ ¸µÅ© ¹ß¼Û
   const [forgotEmail, setForgotEmail] = useState("");
   const [forgotSubmitting, setForgotSubmitting] = useState(false);
   const [forgotMessage, setForgotMessage] = useState("");
   const [forgotError, setForgotError] = useState("");
 
-  // ì´ë©”ì¼ì˜ ì¬ì„¤ì • ë§í¬ë¥¼ íƒ€ê³  ëŒì•„ì™”ì„ ë•Œ: ìƒˆ ë¹„ë°€ë²ˆí˜¸ ì„¤ì •
+  // ÀÌ¸ŞÀÏÀÇ Àç¼³Á¤ ¸µÅ©¸¦ Å¸°í µ¹¾Æ¿ÔÀ» ¶§: »õ ºñ¹Ğ¹øÈ£ ¼³Á¤
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
   const [resetSubmitting, setResetSubmitting] = useState(false);
@@ -258,7 +297,7 @@ export default function App() {
       if (!newSession) {
         hasLoadedCloudDataRef.current = false;
       }
-      // ì´ë©”ì¼ì˜ ì¬ì„¤ì • ë§í¬ë¥¼ í´ë¦­í•´ì„œ ëŒì•„ì˜¤ë©´ Supabaseê°€ ì´ ì´ë²¤íŠ¸ë¥¼ ë°œìƒì‹œí‚¨ë‹¤.
+      // ÀÌ¸ŞÀÏÀÇ Àç¼³Á¤ ¸µÅ©¸¦ Å¬¸¯ÇØ¼­ µ¹¾Æ¿À¸é Supabase°¡ ÀÌ ÀÌº¥Æ®¸¦ ¹ß»ı½ÃÅ²´Ù.
       if (event === "PASSWORD_RECOVERY") {
         setAuthView("reset");
       }
@@ -293,7 +332,7 @@ export default function App() {
     if (error) {
       setForgotError(error.message);
     } else {
-      setForgotMessage("ğŸ“§ ì…ë ¥í•˜ì‹  ì´ë©”ì¼ë¡œ ë¹„ë°€ë²ˆí˜¸ ì¬ì„¤ì • ë§í¬ë¥¼ ë³´ëƒˆìŠµë‹ˆë‹¤. ë©”ì¼í•¨(ìŠ¤íŒ¸í•¨ í¬í•¨)ì„ í™•ì¸í•´ ì£¼ì„¸ìš”.");
+      setForgotMessage("?? ÀÔ·ÂÇÏ½Å ÀÌ¸ŞÀÏ·Î ºñ¹Ğ¹øÈ£ Àç¼³Á¤ ¸µÅ©¸¦ º¸³Â½À´Ï´Ù. ¸ŞÀÏÇÔ(½ºÆÔÇÔ Æ÷ÇÔ)À» È®ÀÎÇØ ÁÖ¼¼¿ä.");
     }
     setForgotSubmitting(false);
   };
@@ -303,11 +342,11 @@ export default function App() {
     if (!supabase) return;
     setResetError("");
     if (newPassword.length < 6) {
-      setResetError("ë¹„ë°€ë²ˆí˜¸ëŠ” 6ì ì´ìƒì´ì–´ì•¼ í•©ë‹ˆë‹¤.");
+      setResetError("ºñ¹Ğ¹øÈ£´Â 6ÀÚ ÀÌ»óÀÌ¾î¾ß ÇÕ´Ï´Ù.");
       return;
     }
     if (newPassword !== newPasswordConfirm) {
-      setResetError("ë‘ ë¹„ë°€ë²ˆí˜¸ê°€ ì„œë¡œ ë‹¤ë¦…ë‹ˆë‹¤.");
+      setResetError("µÎ ºñ¹Ğ¹øÈ£°¡ ¼­·Î ´Ù¸¨´Ï´Ù.");
       return;
     }
     setResetSubmitting(true);
@@ -317,13 +356,13 @@ export default function App() {
       setResetSubmitting(false);
       return;
     }
-    setResetMessage("âœ… ë¹„ë°€ë²ˆí˜¸ê°€ ë³€ê²½ë˜ì—ˆìŠµë‹ˆë‹¤. ì´ì œ ì´ ë¹„ë°€ë²ˆí˜¸ë¡œ ë¡œê·¸ì¸í•˜ì„¸ìš”.");
+    setResetMessage("? ºñ¹Ğ¹øÈ£°¡ º¯°æµÇ¾ú½À´Ï´Ù. ÀÌÁ¦ ÀÌ ºñ¹Ğ¹øÈ£·Î ·Î±×ÀÎÇÏ¼¼¿ä.");
     setResetSubmitting(false);
     setNewPassword("");
     setNewPasswordConfirm("");
   };
 
-  // --- 0b. SUPABASE DATA SYNC (ì˜êµ¬ ì €ì¥ + ë¶€ë¶€ê°„ ì‹¤ì‹œê°„ ê³µìœ ) ---
+  // --- 0b. SUPABASE DATA SYNC (¿µ±¸ ÀúÀå + ºÎºÎ°£ ½Ç½Ã°£ °øÀ¯) ---
   useEffect(() => {
     if (!supabase || !session) {
       setCloudDataLoading(false);
@@ -332,8 +371,8 @@ export default function App() {
     let cancelled = false;
     setCloudDataLoading(authGateEnabled && !hasLoadedCloudDataRef.current);
 
-    // Supabase(PostgREST)ëŠ” í•œ ë²ˆì— ìµœëŒ€ 1000í–‰ë§Œ ëŒë ¤ì¤€ë‹¤ - ì›ì¥ì²˜ëŸ¼ 1000ê±´ì´ ë„˜ëŠ” í…Œì´ë¸”ì€
-    // range()ë¡œ ê³„ì† ì´ì–´ë°›ì•„ì•¼ ë’¤ìª½ ë°ì´í„°ê°€ ì˜ë¦¬ì§€ ì•ŠëŠ”ë‹¤.
+    // Supabase(PostgREST)´Â ÇÑ ¹ø¿¡ ÃÖ´ë 1000Çà¸¸ µ¹·ÁÁØ´Ù - ¿øÀåÃ³·³ 1000°ÇÀÌ ³Ñ´Â Å×ÀÌºíÀº
+    // range()·Î °è¼Ó ÀÌ¾î¹Ş¾Æ¾ß µÚÂÊ µ¥ÀÌÅÍ°¡ Àß¸®Áö ¾Ê´Â´Ù.
     const fetchAllRows = async (tableName: string, orderCol?: string): Promise<any[]> => {
       if (!supabase) return [];
       const pageSize = 1000;
@@ -344,7 +383,7 @@ export default function App() {
         if (orderCol) query = query.order(orderCol, { ascending: true });
         const { data, error } = await query;
         if (error) {
-          console.error(`[Supabase] ${tableName} ë¶ˆëŸ¬ì˜¤ê¸° ì‹¤íŒ¨:`, error.message);
+          console.error(`[Supabase] ${tableName} ºÒ·¯¿À±â ½ÇÆĞ:`, error.message);
           break;
         }
         if (!data || data.length === 0) break;
@@ -367,19 +406,25 @@ export default function App() {
       ]);
       if (cancelled) return;
 
-      setLedger(ledgerRows.map((r: any) => ({
-        id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
-        amount: Number(r.amount), active: r.active, date: r.date,
-        memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
-      })));
-      // ì› ë‹¨ìœ„ëŠ” ì†Œìˆ˜ì ì´ ì—†ì–´ì•¼ í•˜ë¯€ë¡œ(ì¬ì—…ë¡œë“œ ì „ ì €ì¥ëœ ì˜ˆì „ ë°ì´í„°ì— ì†Œìˆ˜ì ì´ ë‚¨ì•„ìˆì„ ìˆ˜ ìˆì–´) ë°˜ì˜¬ë¦¼í•œë‹¤.
-      setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
-      setSavingsAssets([]);
-      setElectronicAssets([]);
-      setInvestmentAssets(investRows.map((r: any) => ({
-        name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
-      })));
-      setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
+      if (ledgerRows.length > 0) {
+        setLedger(ledgerRows.map((r: any) => ({
+          id: r.id, month: r.month, type: r.type, category: r.category, content: r.content,
+          amount: Number(r.amount), active: r.active, date: r.date,
+          memo: r.memo || "", paymentMethod: r.payment_method || "", spender: r.spender || ""
+        })));
+      }
+      if (freeRows.length > 0) {
+        // ¿ø ´ÜÀ§´Â ¼Ò¼öÁ¡ÀÌ ¾ø¾î¾ß ÇÏ¹Ç·Î(Àç¾÷·Îµå Àü ÀúÀåµÈ ¿¹Àü µ¥ÀÌÅÍ¿¡ ¼Ò¼öÁ¡ÀÌ ³²¾ÆÀÖÀ» ¼ö ÀÖ¾î) ¹İ¿Ã¸²ÇÑ´Ù.
+        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
+      }
+      if (investRows.length > 0) {
+        setInvestmentAssets(investRows.map((r: any) => ({
+          name: r.name, principal: Math.round(Number(r.principal)), appraised: Math.round(Number(r.appraised)), yieldRate: Number(r.yield_rate)
+        })));
+      }
+      if (checklistRows.length > 0) {
+        setChecklist(checklistRows.map((r: any) => ({ id: r.id, label: r.label, done: r.done, sortOrder: r.sort_order })));
+      }
       setMortgagePayments(paymentsRows.map((r: any) => ({ id: r.id, paymentDate: r.payment_date, amount: Number(r.amount), memo: r.memo || "" })));
       if (settingsRes.data) {
         LIABILITY_MORTGAGE.name = settingsRes.data.mortgage_name;
@@ -415,24 +460,24 @@ export default function App() {
     };
   }, [session]);
 
-  // Supabase ì“°ê¸° í—¬í¼ (ë¡œì»¬ ìƒíƒœëŠ” ì´ë¯¸ ë‚™ê´€ì ìœ¼ë¡œ ê°±ì‹ ë˜ê³ , ì´ í˜¸ì¶œë“¤ì€ ë‹¤ë¥¸ ê¸°ê¸°ì™€ì˜ ë™ê¸°í™”ë¥¼ ìœ„í•œ ê²ƒ)
-  // Supabase ì“°ê¸° ì‹¤íŒ¨ëŠ” ê·¸ë™ì•ˆ ì¡°ìš©íˆ ë¬´ì‹œë˜ê³  ìˆì—ˆë‹¤(ì½˜ì†”ì—ë„ ì•ˆ ë‚¨ìŒ) â€” ì‹¤íŒ¨ê°€ ì‹¤ì œë¡œ ë³´ì´ë„ë¡ í•­ìƒ errorë¥¼ í™•ì¸í•´ ë¡œê·¸ë¡œ ë‚¨ê¸´ë‹¤.
+  // Supabase ¾²±â ÇïÆÛ (·ÎÄÃ »óÅÂ´Â ÀÌ¹Ì ³«°üÀûÀ¸·Î °»½ÅµÇ°í, ÀÌ È£ÃâµéÀº ´Ù¸¥ ±â±â¿ÍÀÇ µ¿±âÈ­¸¦ À§ÇÑ °Í)
+  // Supabase ¾²±â ½ÇÆĞ´Â ±×µ¿¾È Á¶¿ëÈ÷ ¹«½ÃµÇ°í ÀÖ¾ú´Ù(ÄÜ¼Ö¿¡µµ ¾È ³²À½) ? ½ÇÆĞ°¡ ½ÇÁ¦·Î º¸ÀÌµµ·Ï Ç×»ó error¸¦ È®ÀÎÇØ ·Î±×·Î ³²±ä´Ù.
   const logSupabaseError = (label: string, error: { message: string } | null) => {
     if (error) {
-      console.error(`[Supabase] ${label} ì‹¤íŒ¨:`, error.message);
+      console.error(`[Supabase] ${label} ½ÇÆĞ:`, error.message);
     }
   };
 
   const syncLedgerReplaceToSupabase = async (items: LedgerItem[]): Promise<boolean> => {
     if (!supabase || !session) return true;
     const { error: delError } = await supabase.from("ledger_items").delete().gte("id", 0);
-    logSupabaseError("ê°€ê³„ë¶€ ì „ì²´ ì‚­ì œ", delError);
+    logSupabaseError("°¡°èºÎ ÀüÃ¼ »èÁ¦", delError);
     if (items.length > 0) {
       const { error: insError } = await supabase.from("ledger_items").insert(items.map(i => ({
         id: i.id, month: i.month, type: i.type, category: i.category, content: i.content,
         amount: i.amount, active: i.active, date: i.date, memo: i.memo || "", payment_method: i.paymentMethod || "", spender: i.spender || ""
       })));
-      logSupabaseError("ê°€ê³„ë¶€ ì¼ê´„ ì €ì¥", insError);
+      logSupabaseError("°¡°èºÎ ÀÏ°ı ÀúÀå", insError);
       return !delError && !insError;
     }
     return !delError;
@@ -444,34 +489,34 @@ export default function App() {
       id: item.id, month: item.month, type: item.type, category: item.category, content: item.content,
       amount: item.amount, active: item.active, date: item.date, memo: item.memo || "", payment_method: item.paymentMethod || "", spender: item.spender || ""
     });
-    logSupabaseError("ê°€ê³„ë¶€ í•­ëª© ì €ì¥", error);
+    logSupabaseError("°¡°èºÎ Ç×¸ñ ÀúÀå", error);
   };
 
   const deleteLedgerItemFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
     const { error } = await supabase.from("ledger_items").delete().eq("id", id);
-    logSupabaseError("ê°€ê³„ë¶€ í•­ëª© ì‚­ì œ", error);
+    logSupabaseError("°¡°èºÎ Ç×¸ñ »èÁ¦", error);
   };
 
   const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[]): Promise<boolean> => {
     if (!supabase || !session) return true;
     let ok = true;
     const { error: delFreeError } = await supabase.from("asset_free_items").delete().gte("id", 0);
-    logSupabaseError("ììœ ì…ì¶œê¸ˆ ìì‚° ì „ì²´ ì‚­ì œ", delFreeError);
+    logSupabaseError("ÀÚÀ¯ÀÔÃâ±İ ÀÚ»ê ÀüÃ¼ »èÁ¦", delFreeError);
     ok = ok && !delFreeError;
     const { error: delInvError } = await supabase.from("asset_investment_items").delete().gte("id", 0);
-    logSupabaseError("íˆ¬ì ìì‚° ì „ì²´ ì‚­ì œ", delInvError);
+    logSupabaseError("ÅõÀÚ ÀÚ»ê ÀüÃ¼ »èÁ¦", delInvError);
     ok = ok && !delInvError;
     if (free.length > 0) {
       const { error } = await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
-      logSupabaseError("ììœ ì…ì¶œê¸ˆ ìì‚° ì €ì¥", error);
+      logSupabaseError("ÀÚÀ¯ÀÔÃâ±İ ÀÚ»ê ÀúÀå", error);
       ok = ok && !error;
     }
     if (investments.length > 0) {
       const { error } = await supabase.from("asset_investment_items").insert(investments.map(i => ({
         name: i.name, principal: i.principal, appraised: i.appraised, yield_rate: i.yieldRate
       })));
-      logSupabaseError("íˆ¬ì ìì‚° ì €ì¥", error);
+      logSupabaseError("ÅõÀÚ ÀÚ»ê ÀúÀå", error);
       ok = ok && !error;
     }
     return ok;
@@ -480,13 +525,13 @@ export default function App() {
   const upsertChecklistItemToSupabase = async (item: ChecklistItem) => {
     if (!supabase || !session) return;
     const { error } = await supabase.from("checklist_items").upsert({ id: item.id, label: item.label, done: item.done, sort_order: item.sortOrder });
-    logSupabaseError("ì²´í¬ë¦¬ìŠ¤íŠ¸ ì €ì¥", error);
+    logSupabaseError("Ã¼Å©¸®½ºÆ® ÀúÀå", error);
   };
 
   const deleteChecklistItemFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
     const { error } = await supabase.from("checklist_items").delete().eq("id", id);
-    logSupabaseError("ì²´í¬ë¦¬ìŠ¤íŠ¸ ì‚­ì œ", error);
+    logSupabaseError("Ã¼Å©¸®½ºÆ® »èÁ¦", error);
   };
 
   const insertMortgagePaymentToSupabase = async (payment: MortgagePayment) => {
@@ -494,21 +539,21 @@ export default function App() {
     const { error } = await supabase.from("mortgage_payments").insert({
       id: payment.id, payment_date: payment.paymentDate, amount: payment.amount, memo: payment.memo || ""
     });
-    logSupabaseError("ëŒ€ì¶œ ìƒí™˜ ê¸°ë¡ ì €ì¥", error);
+    logSupabaseError("´ëÃâ »óÈ¯ ±â·Ï ÀúÀå", error);
   };
 
   const deleteMortgagePaymentFromSupabase = async (id: number) => {
     if (!supabase || !session) return;
     const { error } = await supabase.from("mortgage_payments").delete().eq("id", id);
-    logSupabaseError("ëŒ€ì¶œ ìƒí™˜ ê¸°ë¡ ì‚­ì œ", error);
+    logSupabaseError("´ëÃâ »óÈ¯ ±â·Ï »èÁ¦", error);
   };
 
-  // household_settingsëŠ” ë‹¨ì¼ í–‰(id=1)ì´ ë¯¸ë¦¬ ì¡´ì¬í•´ì•¼ updateê°€ ë¨¹ëŠ”ë°, ê·¸ í–‰ì´ ì—†ìœ¼ë©´ updateëŠ”
-  // "ì„±ê³µ"í•œ ê²ƒì²˜ëŸ¼ ë³´ì´ë©´ì„œ ì‹¤ì œë¡œëŠ” ì•„ë¬´ê²ƒë„ ë°˜ì˜ë˜ì§€ ì•ŠëŠ”ë‹¤. upsertë¡œ ë°”ê¿” í–‰ì´ ì—†ì–´ë„ í•­ìƒ ë°˜ì˜ë˜ê²Œ í•œë‹¤.
+  // household_settings´Â ´ÜÀÏ Çà(id=1)ÀÌ ¹Ì¸® Á¸ÀçÇØ¾ß update°¡ ¸Ô´Âµ¥, ±× ÇàÀÌ ¾øÀ¸¸é update´Â
+  // "¼º°ø"ÇÑ °ÍÃ³·³ º¸ÀÌ¸é¼­ ½ÇÁ¦·Î´Â ¾Æ¹«°Íµµ ¹İ¿µµÇÁö ¾Ê´Â´Ù. upsert·Î ¹Ù²ã ÇàÀÌ ¾ø¾îµµ Ç×»ó ¹İ¿µµÇ°Ô ÇÑ´Ù.
   const updateHouseholdSettingsInSupabase = async (patch: Record<string, unknown>) => {
     if (!supabase || !session) return;
     const { error } = await supabase.from("household_settings").upsert({ id: 1, ...patch });
-    logSupabaseError("ê°€ê³„ ì„¤ì • ì €ì¥", error);
+    logSupabaseError("°¡°è ¼³Á¤ ÀúÀå", error);
   };
 
   // --- 2. LEDGER MONTH SELECTION & FORM STATES ---
@@ -518,37 +563,49 @@ export default function App() {
   const [selectedMonths, setSelectedMonths] = useState<string[]>(["2026-07"]);
   const [ledgerSortMode, setLedgerSortMode] = useState<"date" | "spender" | "amount">("date");
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState<string>("");
-  const [ledgerReflectionFilter, setLedgerReflectionFilter] = useState<"all" | "active" | "inactive">("all");
+  const [ledgerVisibilityFilter, setLedgerVisibilityFilter] = useState<"all" | "active" | "inactive">("all");
 
-  // ìì‚° ë³€ë™ ì¶”ì´ ë¹„êµ ì›” (3ë²ˆ: ìì‚° íƒ­ì—ì„œ ë¹„êµí•  ì›”ë“¤ì„ ì§ì ‘ ì„ íƒ)
+  const [assetSnapshots, setAssetSnapshots] = useState<Record<string, AssetSnapshot>>(() => {
+    const saved = localStorage.getItem("VIVALDI_ASSET_SNAPSHOTS");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+      } catch (e) { /* ignore */ }
+    }
+    return {};
+  });
+  const [selectedAssetMonth, setSelectedAssetMonth] = useState<string>(() => localStorage.getItem("VIVALDI_SELECTED_ASSET_MONTH") || "");
+
+  // ÀÚ»ê º¯µ¿ ÃßÀÌ ºñ±³ ¿ù (3¹ø: ÀÚ»ê ÅÇ¿¡¼­ ºñ±³ÇÒ ¿ùµéÀ» Á÷Á¢ ¼±ÅÃ)
   const [assetCompareMonths, setAssetCompareMonths] = useState<string[]>([]);
 
-  // ì¬ë¬´ì  ì§€ì¶œ ë¶„ì„ íƒ­: ì¹´í…Œê³ ë¦¬ë³„ ìƒì„¸ ì§€ì¶œ ë“œë¦´ë‹¤ìš´ ì„ íƒ ìƒíƒœ
-  const [drilldownCategory, setDrilldownCategory] = useState<string>("ì „ì²´");
+  // Àç¹«Àû ÁöÃâ ºĞ¼® ÅÇ: Ä«Å×°í¸®º° »ó¼¼ ÁöÃâ µå¸±´Ù¿î ¼±ÅÃ »óÅÂ
+  const [drilldownCategory, setDrilldownCategory] = useState<string>("ÀüÃ¼");
 
-  // Gemini ë°ì´í„° ë¶„ì„ ì±—ë´‡: Vercel ì„œë²„ë¦¬ìŠ¤ í•¨ìˆ˜ì˜ GEMINI_API_KEY í™˜ê²½ë³€ìˆ˜ë¡œ ìë™ í˜¸ì¶œí•œë‹¤.
+  // Gemini µ¥ÀÌÅÍ ºĞ¼® Ãªº¿: Vercel ¼­¹ö¸®½º ÇÔ¼öÀÇ GEMINI_API_KEY È¯°æº¯¼ö·Î ÀÚµ¿ È£ÃâÇÑ´Ù.
   const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
   const [chatInput, setChatInput] = useState<string>("");
   const [chatLoading, setChatLoading] = useState<boolean>(false);
 
-  // ì§ì ‘ ë©”ëª¨ ê¸°ëŠ¥ (VIVALDI_CATEGORY_MEMOS)
+  // Á÷Á¢ ¸Ş¸ğ ±â´É (VIVALDI_CATEGORY_MEMOS)
   const [categoryMemos, setCategoryMemos] = useState<Record<string, Record<string, string>>>(() => {
     const saved = localStorage.getItem("VIVALDI_CATEGORY_MEMOS");
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { /* ignore */ }
     }
-    // ì´ˆê¸° í…œí”Œë¦¿ ë©”ëª¨
+    // ÃÊ±â ÅÛÇÃ¸´ ¸Ş¸ğ
     return {
       "2026-07": {
-        "ì‹ë¹„": "ì§‘ë“¤ì´ ë° ì´ì‚¬ í„±ìœ¼ë¡œ ê³¼ì§€ì¶œë¨. 8ì›”ì—” ì™¸ì‹ ì¤„ì´ê¸°",
-        "ì–‘ìœ¡/ê¸°íƒ€": "ì–´ë¨¸ë‹ˆ ê°ì‚¬ìˆ˜ë‹¹ ê³ ì • ì§€ì¶œ",
-        "ì£¼ê±°/ëŒ€ì¶œ": "ì²« ì£¼ë‹´ëŒ€ ì •ê¸° ì´ì ì •ìƒ ë‚©ë¶€ ì™„ë£Œ",
-        "ê³µê³¼ê¸ˆ/ê´€ë¦¬ë¹„": "ì²« ê´€ë¦¬ë¹„ ê³„ì ˆ ìš”ì¸ ë¶„ì„ í•„ìš”"
+        "½Äºñ": "ÁıµéÀÌ ¹× ÀÌ»ç ÅÎÀ¸·Î °úÁöÃâµÊ. 8¿ù¿£ ¿Ü½Ä ÁÙÀÌ±â",
+        "¾çÀ°/±âÅ¸": "¾î¸Ó´Ï °¨»ç¼ö´ç °íÁ¤ ÁöÃâ",
+        "ÁÖ°Å/´ëÃâ": "Ã¹ ÁÖ´ã´ë Á¤±â ÀÌÀÚ Á¤»ó ³³ºÎ ¿Ï·á",
+        "°ø°ú±İ/°ü¸®ºñ": "Ã¹ °ü¸®ºñ °èÀı ¿äÀÎ ºĞ¼® ÇÊ¿ä"
       }
     };
   });
 
-  // ì¹´í…Œê³ ë¦¬ ë©”ëª¨ ë³€ê²½ í•¸ë“¤ëŸ¬
+  // Ä«Å×°í¸® ¸Ş¸ğ º¯°æ ÇÚµé·¯
   const handleCategoryMemoChange = (month: string, category: string, value: string) => {
     setCategoryMemos(prev => {
       const updated = {
@@ -563,8 +620,8 @@ export default function App() {
     });
   };
 
-  // ê³ ì •ë¹„/ë³€ë™ë¹„ ë¶„ë¥˜ ìƒíƒœ
-  const [categoryTypes, setCategoryTypes] = useState<Record<string, "ê³ ì •ë¹„" | "ë³€ë™ë¹„">>(() => {
+  // °íÁ¤ºñ/º¯µ¿ºñ ºĞ·ù »óÅÂ
+  const [categoryTypes, setCategoryTypes] = useState<Record<string, "°íÁ¤ºñ" | "º¯µ¿ºñ">>(() => {
     const saved = localStorage.getItem("VIVALDI_CATEGORY_TYPES");
     if (saved) {
       try {
@@ -574,30 +631,30 @@ export default function App() {
     return {};
   });
 
-  const getCategoryType = (cat: string): "ê³ ì •ë¹„" | "ë³€ë™ë¹„" => {
+  const getCategoryType = (cat: string): "°íÁ¤ºñ" | "º¯µ¿ºñ" => {
     if (categoryTypes && categoryTypes[cat]) {
       return categoryTypes[cat];
     }
     // Default classifications based on keywords
     const fixedKeywords = [
-      "ë³´í—˜", "í†µì‹ ë¹„", "ê´€ë¦¬ë¹„", "ì£¼ê±°ë¹„", "ê³µê³¼ê¸ˆ", "ì„¸ê¸ˆ", "êµ¬ë…", "êµìœ¡", "ëŒ€ì¶œ", "ì›”ì„¸", "í†µì‹ ", "ì„œë¹„ìŠ¤", "ë Œíƒˆ", "ìœ ì¹˜ì›", "ì–´ë¦°ì´ì§‘", "í•™ì›", "ì´ì", "ê´€ë¦¬"
+      "º¸Çè", "Åë½Åºñ", "°ü¸®ºñ", "ÁÖ°Åºñ", "°ø°ú±İ", "¼¼±İ", "±¸µ¶", "±³À°", "´ëÃâ", "¿ù¼¼", "Åë½Å", "¼­ºñ½º", "·»Å»", "À¯Ä¡¿ø", "¾î¸°ÀÌÁı", "ÇĞ¿ø", "ÀÌÀÚ", "°ü¸®"
     ];
     const lower = cat.toLowerCase();
     if (fixedKeywords.some(k => lower.includes(k))) {
-      return "ê³ ì •ë¹„";
+      return "°íÁ¤ºñ";
     }
-    return "ë³€ë™ë¹„";
+    return "º¯µ¿ºñ";
   };
 
   const toggleCategoryType = (cat: string) => {
     const current = getCategoryType(cat);
-    const next = current === "ê³ ì •ë¹„" ? "ë³€ë™ë¹„" : "ê³ ì •ë¹„";
+    const next = current === "°íÁ¤ºñ" ? "º¯µ¿ºñ" : "°íÁ¤ºñ";
     const updated = { ...categoryTypes, [cat]: next };
     setCategoryTypes(updated);
     localStorage.setItem("VIVALDI_CATEGORY_TYPES", JSON.stringify(updated));
   };
 
-  // ì„¸ë¶€ ê³„ì¢Œ ë³´ê¸° í† ê¸€ ìƒíƒœ
+  // ¼¼ºÎ °èÁÂ º¸±â Åä±Û »óÅÂ
   const [expandedAssets, setExpandedAssets] = useState<Record<string, boolean>>({
     free: false,
     savings: false,
@@ -607,22 +664,22 @@ export default function App() {
 
   const isDummyAsset = (name: string) => {
     const dummyKeywords = [
-      "KB Star*tí†µì¥",
-      "KB Wiseí†µì¥",
-      "KBêµ­ë¯¼ONEí†µì¥",
-      "MY ì…ì¶œê¸ˆí†µì¥",
-      "NHì£¼ê±°ë˜ìš°ëŒ€í†µì¥",
-      "WON í†µì¥",
-      "Uë“œë¦¼ ì €ì¶•ì˜ˆê¸ˆ",
-      "ê¸°íƒ€ ì…ì¶œê¸ˆí†µì¥",
-      "ì €ê¸ˆí†µ",
-      "NHì˜¬ì›eì ê¸ˆ",
-      "ì¹´ì¹´ì˜¤í˜ì´ ë¨¸ë‹ˆ",
-      "TIGER ë¯¸êµ­S&P500",
-      "KODEX ì°¨ì´ë‚˜í…Œí¬TOP10",
-      "100ì„¸ì—°ê¸ˆì €ì¶•í€ë“œ",
-      "CMAê³„ì¢Œ",
-      "ì¢…í•©ìœ„íƒê³„ì¢Œ"
+      "KB Star*tÅëÀå",
+      "KB WiseÅëÀå",
+      "KB±¹¹ÎONEÅëÀå",
+      "MY ÀÔÃâ±İÅëÀå",
+      "NHÁÖ°Å·¡¿ì´ëÅëÀå",
+      "WON ÅëÀå",
+      "Uµå¸² ÀúÃà¿¹±İ",
+      "±âÅ¸ ÀÔÃâ±İÅëÀå",
+      "Àú±İÅë",
+      "NH¿Ã¿øeÀû±İ",
+      "Ä«Ä«¿ÀÆäÀÌ ¸Ó´Ï",
+      "TIGER ¹Ì±¹S&P500",
+      "KODEX Â÷ÀÌ³ªÅ×Å©TOP10",
+      "100¼¼¿¬±İÀúÃàÆİµå",
+      "CMA°èÁÂ",
+      "Á¾ÇÕÀ§Å¹°èÁÂ"
     ];
     return dummyKeywords.some(keyword => name.includes(keyword));
   };
@@ -684,11 +741,7 @@ export default function App() {
     return ASSET_INVESTMENTS;
   });
 
-  const freeAssetsRef = useRef(freeAssets);
-  const investmentAssetsRef = useRef(investmentAssets);
-
   useEffect(() => {
-    freeAssetsRef.current = freeAssets;
     localStorage.setItem("VIVALDI_FREE_ASSETS", JSON.stringify(freeAssets));
   }, [freeAssets]);
 
@@ -701,14 +754,107 @@ export default function App() {
   }, [electronicAssets]);
 
   useEffect(() => {
-    investmentAssetsRef.current = investmentAssets;
     localStorage.setItem("VIVALDI_INVESTMENT_ASSETS", JSON.stringify(investmentAssets));
   }, [investmentAssets]);
 
   useEffect(() => {
-    setSyncStatus(emptySyncStatus);
+    if (!supabase) {
+      setSyncStatus(emptySyncStatus);
+      return;
+    }
+
+    let cancelled = false;
+
+    const applyRemoteState = async () => {
+      try {
+        const remoteState = await loadRemoteFinanceState(supabase);
+        if (cancelled) return;
+
+        setLedger(remoteState.ledger);
+        setFreeAssets(remoteState.freeAssets);
+        setSavingsAssets([]);
+        setElectronicAssets([]);
+        setInvestmentAssets(remoteState.investmentAssets);
+        setLedgerFileName("Supabase: income_expenses");
+        setAssetsFileName("Supabase: assets_youngbeom + assets_jaeeun");
+        setSyncStatus(remoteState.syncStatus);
+      } catch (error: any) {
+        console.error("[Supabase remote finance sync]", error);
+        if (!cancelled) {
+          setSyncStatus({
+            ...emptySyncStatus,
+            connected: false,
+            statusText: error?.message || "Supabase sync failed",
+          });
+        }
+      }
+    };
+
+    applyRemoteState();
+
+    const channel = supabase
+      .channel("remote_finance_sync_pipeline")
+      .on("postgres_changes", { event: "*", schema: "public", table: "income_expenses" }, applyRemoteState)
+      .on("postgres_changes", { event: "*", schema: "public", table: "assets_youngbeom" }, applyRemoteState)
+      .on("postgres_changes", { event: "*", schema: "public", table: "assets_jaeeun" }, applyRemoteState)
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
   }, []);
 
+  const assetMonths = Object.keys(assetSnapshots).sort();
+  const latestAssetMonth = assetMonths[assetMonths.length - 1] || "";
+
+  const applyAssetSnapshotToDisplay = (month: string, snapshots = assetSnapshots) => {
+    const snapshot = snapshots[month];
+    if (!snapshot) return;
+    setFreeAssets(snapshot.freeAssets || []);
+    setSavingsAssets(snapshot.savingsAssets || []);
+    setElectronicAssets(snapshot.electronicAssets || []);
+    setInvestmentAssets(snapshot.investmentAssets || []);
+    if (snapshot.liability?.amount) LIABILITY_MORTGAGE.amount = snapshot.liability.amount;
+    if (snapshot.liability?.rate) LIABILITY_MORTGAGE.rate = snapshot.liability.rate;
+  };
+
+  const handleSelectAssetMonth = (month: string) => {
+    setSelectedAssetMonth(month);
+    localStorage.setItem("VIVALDI_SELECTED_ASSET_MONTH", month);
+    applyAssetSnapshotToDisplay(month);
+  };
+
+  const updateSelectedAssetSnapshot = (patch: Partial<AssetSnapshot>) => {
+    if (!selectedAssetMonth) return;
+    setAssetSnapshots(prev => {
+      const snapshot = prev[selectedAssetMonth];
+      if (!snapshot) return prev;
+      return {
+        ...prev,
+        [selectedAssetMonth]: {
+          ...cloneAssetSnapshot(snapshot),
+          ...patch,
+        }
+      };
+    });
+  };
+
+  useEffect(() => {
+    localStorage.setItem("VIVALDI_ASSET_SNAPSHOTS", JSON.stringify(assetSnapshots));
+  }, [assetSnapshots]);
+
+  useEffect(() => {
+    if (assetMonths.length === 0) return;
+    const targetMonth = selectedAssetMonth && assetSnapshots[selectedAssetMonth] ? selectedAssetMonth : latestAssetMonth;
+    if (!targetMonth) return;
+    if (selectedAssetMonth !== targetMonth) {
+      setSelectedAssetMonth(targetMonth);
+      localStorage.setItem("VIVALDI_SELECTED_ASSET_MONTH", targetMonth);
+    }
+    applyAssetSnapshotToDisplay(targetMonth, assetSnapshots);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetSnapshots, selectedAssetMonth]);
   const toggleAssetExpand = (key: "free" | "savings" | "electronic" | "investment") => {
     setExpandedAssets(prev => ({
       ...prev,
@@ -716,9 +862,9 @@ export default function App() {
     }));
   };
 
-  // ê³„ì¢Œ ëª…ì˜: ê³„ì¢Œëª… ë§¨ ì•ì˜ "[ì˜ë²”] " ê°™ì€ íƒœê·¸ë¡œ ì €ì¥/íŒŒì‹±í•œë‹¤ (ë‹¤ì¤‘ ì‹œíŠ¸ ì—…ë¡œë“œ ë•Œì™€ ë™ì¼í•œ ë°©ì‹).
-  const ASSET_OWNER_OPTIONS = ["ë¯¸ì§€ì •", "ì˜ë²”", "ì¬ì€", "ê³µë™"];
-  const parseAssetOwner = (name: string) => name.match(/^\[(.+?)\]\s*/)?.[1] || "ë¯¸ì§€ì •";
+  // °èÁÂ ¸íÀÇ: °èÁÂ¸í ¸Ç ¾ÕÀÇ "[¿µ¹ü] " °°Àº ÅÂ±×·Î ÀúÀå/ÆÄ½ÌÇÑ´Ù (´ÙÁß ½ÃÆ® ¾÷·Îµå ¶§¿Í µ¿ÀÏÇÑ ¹æ½Ä).
+  const ASSET_OWNER_OPTIONS = ["¹ÌÁöÁ¤", "¿µ¹ü", "ÀçÀº", "°øµ¿"];
+  const parseAssetOwner = (name: string) => name.match(/^\[(.+?)\]\s*/)?.[1] || "¹ÌÁöÁ¤";
   const stripAssetOwnerTag = (name: string) => name.replace(/^\[.+?\]\s*/, "");
 
   const handleSetFreeAssetOwner = (index: number, owner: string) => {
@@ -726,8 +872,9 @@ export default function App() {
       const next = prev.map((a, i) => {
         if (i !== index) return a;
         const baseName = stripAssetOwnerTag(a.name);
-        return { ...a, name: owner === "ë¯¸ì§€ì •" ? baseName : `[${owner}] ${baseName}` };
+        return { ...a, name: owner === "¹ÌÁöÁ¤" ? baseName : `[${owner}] ${baseName}` };
       });
+      updateSelectedAssetSnapshot({ freeAssets: next });
       syncAssetsReplaceToSupabase(next, investmentAssets);
       return next;
     });
@@ -738,8 +885,9 @@ export default function App() {
       const next = prev.map((a, i) => {
         if (i !== index) return a;
         const baseName = stripAssetOwnerTag(a.name);
-        return { ...a, name: owner === "ë¯¸ì§€ì •" ? baseName : `[${owner}] ${baseName}` };
+        return { ...a, name: owner === "¹ÌÁöÁ¤" ? baseName : `[${owner}] ${baseName}` };
       });
+      updateSelectedAssetSnapshot({ investmentAssets: next });
       syncAssetsReplaceToSupabase(freeAssets, next);
       return next;
     });
@@ -754,16 +902,16 @@ export default function App() {
     });
   };
 
-  // ìì‚° ë¹„êµ ì›” ê¸°ë³¸ê°’: ì›ì¥ì— ê¸°ë¡ëœ ì›” ì¤‘ ìµœê·¼ 3ê°œì›”ì„ ìë™ ì„ íƒ (ì‚¬ìš©ìê°€ ì–¸ì œë“  ì§ì ‘ ë°”ê¿€ ìˆ˜ ìˆìŒ)
+  // ÀÚ»ê ºñ±³ ¿ù ±âº»°ª: ¾÷·ÎµåµÈ ÀÚ»ê snapshot Áß ÃÖ±Ù 3°³¿ùÀ» ÀÚµ¿ ¼±ÅÃÇÑ´Ù.
   useEffect(() => {
-    if (uniqueMonths.length === 0) return;
+    if (assetMonths.length === 0) return;
     setAssetCompareMonths(prev => {
-      const stillValid = prev.filter(m => uniqueMonths.includes(m));
+      const stillValid = prev.filter(m => assetMonths.includes(m));
       if (stillValid.length > 0) return stillValid;
-      return uniqueMonths.slice(-3);
+      return assetMonths.slice(-3);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger.length]);
+  }, [assetMonths.join("|")]);
 
   // If the current selected month is not in uniqueMonths (e.g. all deleted), fallback
   useEffect(() => {
@@ -793,34 +941,41 @@ export default function App() {
 
   // Active ledger items for calculation
   const getMonthlyIncomes = (m: string) => {
-    return ledger.filter(item => item.month === m && item.type === "ìˆ˜ì…" && item.active);
+    return ledger.filter(item => item.month === m && item.type === "¼öÀÔ" && item.active);
   };
   const getMonthlyExpenses = (m: string) => {
-    return ledger.filter(item => item.month === m && item.type === "ì§€ì¶œ" && item.active);
+    return ledger.filter(item => item.month === m && item.type === "ÁöÃâ" && item.active);
   };
 
   const getSelectedMonthsIncomes = () => {
     if (isMultiMonth) {
-      return ledger.filter(item => selectedMonths.includes(item.month) && item.type === "ìˆ˜ì…" && item.active);
+      return ledger.filter(item => selectedMonths.includes(item.month) && item.type === "¼öÀÔ" && item.active);
     }
-    return ledger.filter(item => item.month === selectedMonth && item.type === "ìˆ˜ì…" && item.active);
+    return ledger.filter(item => item.month === selectedMonth && item.type === "¼öÀÔ" && item.active);
   };
 
   const getSelectedMonthsExpenses = () => {
     if (isMultiMonth) {
-      return ledger.filter(item => selectedMonths.includes(item.month) && item.type === "ì§€ì¶œ" && item.active);
+      return ledger.filter(item => selectedMonths.includes(item.month) && item.type === "ÁöÃâ" && item.active);
     }
-    return ledger.filter(item => item.month === selectedMonth && item.type === "ì§€ì¶œ" && item.active);
+    return ledger.filter(item => item.month === selectedMonth && item.type === "ÁöÃâ" && item.active);
   };
 
   const activeIncomeTotal = getSelectedMonthsIncomes().reduce((sum, item) => sum + item.amount, 0);
   const activeExpenseTotal = getSelectedMonthsExpenses().reduce((sum, item) => sum + item.amount, 0);
   const netMonthlyIncome = activeIncomeTotal - activeExpenseTotal;
+  const scopedLedgerItems = sortLedgerItems(
+    filterLedgerItems(
+      ledger.filter(item => (isMultiMonth ? selectedMonths.includes(item.month) : item.month === selectedMonth))
+    )
+  );
+  const scopedIncomeItems = scopedLedgerItems.filter(item => item.type === "¼öÀÔ");
+  const scopedExpenseItems = scopedLedgerItems.filter(item => item.type === "ÁöÃâ");
 
   // --- 3.1 FINANCIAL EXPENSE BRIEFING ENGINE ---
   const calculateMonthlyBriefing = (m: string) => {
-    const expenses = ledger.filter(item => item.month === m && item.type === "ì§€ì¶œ" && item.active);
-    const incomes = ledger.filter(item => item.month === m && item.type === "ìˆ˜ì…" && item.active);
+    const expenses = ledger.filter(item => item.month === m && item.type === "ÁöÃâ" && item.active);
+    const incomes = ledger.filter(item => item.month === m && item.type === "¼öÀÔ" && item.active);
     
     const totalIncome = incomes.reduce((sum, item) => sum + item.amount, 0);
     const totalExpense = expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -829,7 +984,7 @@ export default function App() {
     let variableSum = 0;
     const categoryTotals: Record<string, number> = {};
     
-    const fixedKeywords = ["ë³´í—˜", "í†µì‹ ", "ê´€ë¦¬ë¹„", "ì£¼ê±°", "ê³µê³¼ê¸ˆ", "ì„¸ê¸ˆ", "êµ¬ë…", "êµìœ¡", "ëŒ€ì¶œ", "ì›”ì„¸", "ì„œë¹„ìŠ¤", "ë Œíƒˆ", "ìœ ì¹˜ì›", "ì–´ë¦°ì´ì§‘", "í•™ì›", "ì´ì", "ê´€ë¦¬", "ê¸ˆìœµ/ë³´í—˜", "ì£¼ê±°/í†µì‹ ", "ìë™ì°¨(ì„¸ê¸ˆ/ë³´í—˜)"];
+    const fixedKeywords = ["º¸Çè", "Åë½Å", "°ü¸®ºñ", "ÁÖ°Å", "°ø°ú±İ", "¼¼±İ", "±¸µ¶", "±³À°", "´ëÃâ", "¿ù¼¼", "¼­ºñ½º", "·»Å»", "À¯Ä¡¿ø", "¾î¸°ÀÌÁı", "ÇĞ¿ø", "ÀÌÀÚ", "°ü¸®", "±İÀ¶/º¸Çè", "ÁÖ°Å/Åë½Å", "ÀÚµ¿Â÷(¼¼±İ/º¸Çè)"];
     
     expenses.forEach(item => {
       const cat = item.category;
@@ -850,8 +1005,8 @@ export default function App() {
     let foodSum = 0;
     let insuranceSum = 0;
     
-    const foodKeywords = ["ì‹ë¹„", "ë§ˆíŠ¸", "ë°°ë‹¬", "ì™¸ì‹", "ì‹ì¬ë£Œ", "ì»¤í”¼", "ìŒë£Œ", "ì–‘ì‹", "í•œì‹", "ì¤‘ì‹", "ì¼ì‹", "í¸ì˜ì ", "ì¹´í˜", "ê°„ì‹", "ì¥ë³´ê¸°"];
-    const insuranceKeywords = ["ë³´í—˜", "ë³´ì¥ì„±", "ì‹¤ë¹„", "ì¢…ì‹ ", "ì—°ê¸ˆ", "ê¸ˆìœµ/ë³´í—˜"];
+    const foodKeywords = ["½Äºñ", "¸¶Æ®", "¹è´Ş", "¿Ü½Ä", "½ÄÀç·á", "Ä¿ÇÇ", "À½·á", "¾ç½Ä", "ÇÑ½Ä", "Áß½Ä", "ÀÏ½Ä", "ÆíÀÇÁ¡", "Ä«Æä", "°£½Ä", "Àåº¸±â"];
+    const insuranceKeywords = ["º¸Çè", "º¸Àå¼º", "½Çºñ", "Á¾½Å", "¿¬±İ", "±İÀ¶/º¸Çè"];
     
     expenses.forEach(item => {
       const cat = item.category;
@@ -872,21 +1027,21 @@ export default function App() {
     const top5 = sortedCategories.slice(0, 5) as [string, number][];
     
     const insights: string[] = [];
-    insights.push(`ğŸ“… **${m}ì›” ì´ ì§€ì¶œì€ ${totalExpense.toLocaleString()}ì›**ì…ë‹ˆë‹¤.`);
+    insights.push(`?? **${m}¿ù ÃÑ ÁöÃâÀº ${totalExpense.toLocaleString()}¿ø**ÀÔ´Ï´Ù.`);
     
-    const fixedStatus = fixedRatio <= 40 ? "ì ì • ìˆ˜ì¤€(40% ì´í•˜)ì´ë©°" : "ë‹¤ì†Œ ë†’ì€ í¸(40% ì´ˆê³¼)ìœ¼ë¡œ ì§‘ì¤‘ ê´€ë¦¬ê°€ í•„ìš”í•˜ë©°";
-    insights.push(`ê³ ì •ë¹„ ë¹„ì¤‘ì´ **${fixedRatio.toFixed(1)}% (${fixedSum.toLocaleString()}ì›)**ë¡œ ${fixedStatus}, ë³€ë™ë¹„ ë¹„ì¤‘ì€ **${variableRatio.toFixed(1)}% (${variableSum.toLocaleString()}ì›)**ì…ë‹ˆë‹¤.`);
+    const fixedStatus = fixedRatio <= 40 ? "ÀûÁ¤ ¼öÁØ(40% ÀÌÇÏ)ÀÌ¸ç" : "´Ù¼Ò ³ôÀº Æí(40% ÃÊ°ú)À¸·Î ÁıÁß °ü¸®°¡ ÇÊ¿äÇÏ¸ç";
+    insights.push(`°íÁ¤ºñ ºñÁßÀÌ **${fixedRatio.toFixed(1)}% (${fixedSum.toLocaleString()}¿ø)**·Î ${fixedStatus}, º¯µ¿ºñ ºñÁßÀº **${variableRatio.toFixed(1)}% (${variableSum.toLocaleString()}¿ø)**ÀÔ´Ï´Ù.`);
     
     if (foodSum > 0) {
-      insights.push(`íŠ¹íˆ **ì‹ë¹„ ì§€ì¶œ(${foodSum.toLocaleString()}ì›)**ì´ ì „ì²´ ì†Œë¹„ì˜ **${foodRatio.toFixed(1)}%**ë¥¼ ì°¨ì§€í•˜ì—¬ ê°€ì¥ í° ë¹„ì¤‘ì„ ë³´ì…ë‹ˆë‹¤.`);
+      insights.push(`Æ¯È÷ **½Äºñ ÁöÃâ(${foodSum.toLocaleString()}¿ø)**ÀÌ ÀüÃ¼ ¼ÒºñÀÇ **${foodRatio.toFixed(1)}%**¸¦ Â÷ÁöÇÏ¿© °¡Àå Å« ºñÁßÀ» º¸ÀÔ´Ï´Ù.`);
     }
     if (insuranceSum > 0) {
-      insights.push(`**ë³´í—˜ë£Œ/ê¸ˆìœµ ì§€ì¶œ(${insuranceSum.toLocaleString()}ì›)**ì€ ì „ì²´ ì§€ì¶œì˜ **${insuranceRatio.toFixed(1)}%**ì…ë‹ˆë‹¤.`);
+      insights.push(`**º¸Çè·á/±İÀ¶ ÁöÃâ(${insuranceSum.toLocaleString()}¿ø)**Àº ÀüÃ¼ ÁöÃâÀÇ **${insuranceRatio.toFixed(1)}%**ÀÔ´Ï´Ù.`);
     }
     if (variableRatio > 50) {
-      insights.push("ë³€ë™ë¹„ ë¹„ì¤‘ì´ ë†’ì€ í¸ì´ë¯€ë¡œ ë¶ˆí•„ìš”í•œ ì™¸ì‹ì´ë‚˜ ë¶ˆí•„ìš”í•œ ì†Œì•¡ ë³€ë™ ì§€ì¶œì„ ì¡°ê¸ˆë§Œ ì¤„ì—¬ë„ ì¶”ê°€ì ì¸ ì €ì¶•ê³¼ ì˜ˆì ê¸ˆ ì—¬ë ¥ì„ í™•ë³´í•  ìˆ˜ ìˆìŠµë‹ˆë‹¤.");
+      insights.push("º¯µ¿ºñ ºñÁßÀÌ ³ôÀº ÆíÀÌ¹Ç·Î ºÒÇÊ¿äÇÑ ¿Ü½ÄÀÌ³ª ºÒÇÊ¿äÇÑ ¼Ò¾× º¯µ¿ ÁöÃâÀ» Á¶±İ¸¸ ÁÙ¿©µµ Ãß°¡ÀûÀÎ ÀúÃà°ú ¿¹Àû±İ ¿©·ÂÀ» È®º¸ÇÒ ¼ö ÀÖ½À´Ï´Ù.");
     } else {
-      insights.push("ë³€ë™ë¹„ ì§€ì¶œì´ í›Œë¥­íˆ ì˜ ê´€ë¦¬ë˜ê³  ìˆìœ¼ë©°, ë‚¨ëŠ” ì‰ì—¬ ìê¸ˆì€ ì¦‰ì‹œ ì €ì¶• ë˜ëŠ” íˆ¬ì ìì‚°ìœ¼ë¡œ ë°°ë¶„í•˜ëŠ” ê²ƒì´ ìœ ë¦¬í•©ë‹ˆë‹¤.");
+      insights.push("º¯µ¿ºñ ÁöÃâÀÌ ÈÇ¸¢È÷ Àß °ü¸®µÇ°í ÀÖÀ¸¸ç, ³²´Â À×¿© ÀÚ±İÀº Áï½Ã ÀúÃà ¶Ç´Â ÅõÀÚ ÀÚ»êÀ¸·Î ¹èºĞÇÏ´Â °ÍÀÌ À¯¸®ÇÕ´Ï´Ù.");
     }
     
     const summaryText = insights.join(" ");
@@ -909,16 +1064,16 @@ export default function App() {
 
   // --- 5. ENHANCED AI WEALTH ADVISOR REPORT ENGINE ---
   const renderAiReport = () => {
-    // 1) ì‹ë¹„ ë° ì–‘ìœ¡/ê¸°íƒ€ ë³€ë™ë¹„ í•­ëª©ì˜ ì ì •ì„± í‰ê°€
-    const selectedExpenses = ledger.filter(item => item.month === selectedMonth && item.type === "ì§€ì¶œ" && item.active);
+    // 1) ½Äºñ ¹× ¾çÀ°/±âÅ¸ º¯µ¿ºñ Ç×¸ñÀÇ ÀûÁ¤¼º Æò°¡
+    const selectedExpenses = ledger.filter(item => item.month === selectedMonth && item.type === "ÁöÃâ" && item.active);
     
     const isFood = (cat: string) => {
       const lower = cat.toLowerCase();
-      return ["ì‹ë¹„", "ë§ˆíŠ¸", "ë°°ë‹¬", "ì™¸ì‹", "ì‹ì¬ë£Œ", "ì»¤í”¼", "ìŒë£Œ", "ì–‘ì‹", "í•œì‹", "ì¤‘ì‹", "ì¼ì‹", "í¸ì˜ì ", "ì¹´í˜", "ê°„ì‹", "ìŒí’ˆ", "í‘¸ë“œ", "ì¥ë³´ê¸°"].some(k => lower.includes(k));
+      return ["½Äºñ", "¸¶Æ®", "¹è´Ş", "¿Ü½Ä", "½ÄÀç·á", "Ä¿ÇÇ", "À½·á", "¾ç½Ä", "ÇÑ½Ä", "Áß½Ä", "ÀÏ½Ä", "ÆíÀÇÁ¡", "Ä«Æä", "°£½Ä", "À½Ç°", "Çªµå", "Àåº¸±â"].some(k => lower.includes(k));
     };
     const isChild = (cat: string) => {
       const lower = cat.toLowerCase();
-      return ["ì–‘ìœ¡", "ìœ¡ì•„", "êµìœ¡", "ì–´ë¦°ì´ì§‘", "ìœ ì¹˜ì›", "í•™ì›", "ê¸°íƒ€", "ì–‘ìœ¡/ê¸°íƒ€"].some(k => lower.includes(k));
+      return ["¾çÀ°", "À°¾Æ", "±³À°", "¾î¸°ÀÌÁı", "À¯Ä¡¿ø", "ÇĞ¿ø", "±âÅ¸", "¾çÀ°/±âÅ¸"].some(k => lower.includes(k));
     };
 
     const foodCost = selectedExpenses.filter(item => isFood(item.category)).reduce((sum, item) => sum + item.amount, 0);
@@ -928,30 +1083,30 @@ export default function App() {
     const foodRatio = Math.round((foodCost / totalSelectedExpense) * 100);
     const childRatio = Math.round((childCost / totalSelectedExpense) * 100);
     
-    // ì‹ë¹„ ì ì •ì„± í‰ê°€ (30ëŒ€ ë¶€ë¶€ ì ì • ì‹ë¹„ ê¶Œì¥ ë¹„ìœ¨ì€ ì „ì²´ ì§€ì¶œì˜ 15%~25% ë‚´ì™¸)
-    let foodStatus = "ì ì • ìˆ˜ì¤€ ìœ ì§€ ì¤‘";
-    let foodGuidance = "ê±´ê°•í•˜ê³  ê· í˜•ì¡íŒ ê°€ê³„ ì†Œë¹„ íë¦„ì„ ì´ì–´ê°€ê³  ìˆìŠµë‹ˆë‹¤.";
+    // ½Äºñ ÀûÁ¤¼º Æò°¡ (30´ë ºÎºÎ ÀûÁ¤ ½Äºñ ±ÇÀå ºñÀ²Àº ÀüÃ¼ ÁöÃâÀÇ 15%~25% ³»¿Ü)
+    let foodStatus = "ÀûÁ¤ ¼öÁØ À¯Áö Áß";
+    let foodGuidance = "°Ç°­ÇÏ°í ±ÕÇüÀâÈù °¡°è ¼Òºñ Èå¸§À» ÀÌ¾î°¡°í ÀÖ½À´Ï´Ù.";
     if (foodRatio > 25) {
-      foodStatus = "ì‹ë¹„ ë¹„ì¤‘ ë‹¤ì†Œ ë†’ìŒ (ì£¼ì˜)";
-      foodGuidance = "ì´ë§ˆíŠ¸ ì¥ë³´ê¸° ë° ì™¸ì‹ íšŸìˆ˜ê°€ ì¦ê°€í–ˆìŠµë‹ˆë‹¤. ë¹„í•„ìˆ˜ ì‹ìì¬ ê³µë™êµ¬ë§¤ë‚˜ ë™ë„¤ ë¡œì»¬ ë§ˆíŠ¸ íŠ¹ê°€ë¥¼ í™œìš©í•´ ì§€ì¶œì„ 5% ì´ìƒ ì–µì œí•´ ë³´ì„¸ìš”.";
+      foodStatus = "½Äºñ ºñÁß ´Ù¼Ò ³ôÀ½ (ÁÖÀÇ)";
+      foodGuidance = "ÀÌ¸¶Æ® Àåº¸±â ¹× ¿Ü½Ä È½¼ö°¡ Áõ°¡Çß½À´Ï´Ù. ºñÇÊ¼ö ½ÄÀÚÀç °øµ¿±¸¸Å³ª µ¿³× ·ÎÄÃ ¸¶Æ® Æ¯°¡¸¦ È°¿ëÇØ ÁöÃâÀ» 5% ÀÌ»ó ¾ïÁ¦ÇØ º¸¼¼¿ä.";
     } else if (foodRatio < 10 && foodCost > 0) {
-      foodStatus = "ì‹ë¹„ ê·¹ë‹¨ì  ì ˆì•½ ì¤‘";
-      foodGuidance = "ê°€ê³„ ë‹¤ì´ì–´íŠ¸ê°€ í›Œë¥­í•˜ë‚˜, ì‹ í˜¼ ë¶€ë¶€ì˜ ì˜ì–‘ ê· í˜•ê³¼ ìƒí™œ ë§Œì¡±ë„ë¥¼ ìœ„í•´ ì§€ë‚˜ì¹œ ì™¸ì‹ í†µì œë³´ë‹¤ëŠ” ê³„íšì  ì§€ì¶œì„ ê¶Œì¥í•©ë‹ˆë‹¤.";
+      foodStatus = "½Äºñ ±Ø´ÜÀû Àı¾à Áß";
+      foodGuidance = "°¡°è ´ÙÀÌ¾îÆ®°¡ ÈÇ¸¢ÇÏ³ª, ½ÅÈ¥ ºÎºÎÀÇ ¿µ¾ç ±ÕÇü°ú »ıÈ° ¸¸Á·µµ¸¦ À§ÇØ Áö³ªÄ£ ¿Ü½Ä ÅëÁ¦º¸´Ù´Â °èÈ¹Àû ÁöÃâÀ» ±ÇÀåÇÕ´Ï´Ù.";
     }
 
-    // ì–‘ìœ¡ë¹„ í‰ê°€ (30ëŒ€ ì–‘ìœ¡ë¹„ ë¹„ì¤‘ ê°€ì´ë“œ: ê°ì‚¬ìˆ˜ë‹¹ ë“± ê³ ì • ì§€ì¶œ í¬í•¨ 20~30% ë‚´ì™¸)
-    let childStatus = "ê³„íšì  ë²”ìœ„ ë‚´ ì§‘í–‰";
-    let childGuidance = "ì–´ë¨¸ë‹ˆ ê°ì‚¬ ìˆ˜ë‹¹ ë“± ë¶€ëª¨ ë³´ì¡° ì–‘ìœ¡ë¹„ê°€ ê·œì¹™ì ìœ¼ë¡œ ì•ˆì •ë˜ê²Œ ê´€ë¦¬ë˜ê³  ìˆìŠµë‹ˆë‹¤.";
+    // ¾çÀ°ºñ Æò°¡ (30´ë ¾çÀ°ºñ ºñÁß °¡ÀÌµå: °¨»ç¼ö´ç µî °íÁ¤ ÁöÃâ Æ÷ÇÔ 20~30% ³»¿Ü)
+    let childStatus = "°èÈ¹Àû ¹üÀ§ ³» ÁıÇà";
+    let childGuidance = "¾î¸Ó´Ï °¨»ç ¼ö´ç µî ºÎ¸ğ º¸Á¶ ¾çÀ°ºñ°¡ ±ÔÄ¢ÀûÀ¸·Î ¾ÈÁ¤µÇ°Ô °ü¸®µÇ°í ÀÖ½À´Ï´Ù.";
     if (childRatio > 35) {
-      childStatus = "ì–‘ìœ¡ë¹„ ê³¼ë°€í™” ìƒíƒœ (ì •ë°€ ëª¨ë‹ˆí„°ë§)";
-      childGuidance = "ëŒë°œ ìœ¡ì•„ìš©í’ˆ êµ¬ë§¤ ë˜ëŠ” ìœ¡ì•„ ì¸í”„ë¼ ì´ˆê¸° ì…‹ì—… ë¹„ìš©ì´ ì¦ê°€í–ˆìŠµë‹ˆë‹¤. ë‹¹ì¥ ê¸‰í•˜ì§€ ì•Šì€ êµêµ¬ ë“±ì€ ë‹¹ê·¼ë§ˆì¼“ ê±°ë˜ë¥¼ ì ê·¹ ì œì•ˆí•©ë‹ˆë‹¤.";
+      childStatus = "¾çÀ°ºñ °ú¹ĞÈ­ »óÅÂ (Á¤¹Ğ ¸ğ´ÏÅÍ¸µ)";
+      childGuidance = "µ¹¹ß À°¾Æ¿ëÇ° ±¸¸Å ¶Ç´Â À°¾Æ ÀÎÇÁ¶ó ÃÊ±â ¼Â¾÷ ºñ¿ëÀÌ Áõ°¡Çß½À´Ï´Ù. ´çÀå ±ŞÇÏÁö ¾ÊÀº ±³±¸ µîÀº ´ç±Ù¸¶ÄÏ °Å·¡¸¦ Àû±Ø Á¦¾ÈÇÕ´Ï´Ù.";
     }
 
-    // 2) ê°€ìš© ìê¸ˆ ë° ì‹¤ì‹œê°„ ìˆ˜ì§€ í”¼ë“œë°±
+    // 2) °¡¿ë ÀÚ±İ ¹× ½Ç½Ã°£ ¼öÁö ÇÇµå¹é
     const isSurplus = netMonthlyIncome >= 0;
     const surplusText = isSurplus 
-      ? `í˜„ì¬ ë‹¹ì›” ìˆœìˆ˜ì…(ì‰ì—¬ ìê¸ˆ) ${netMonthlyIncome.toLocaleString()}ì›ì€ ì¦‰ì‹œ ì•„ë˜ì˜ 3ëŒ€ ìì‚°ë°°ë¶„ í™©ê¸ˆ ê³µì‹ì— íƒœì›Œ ì¡°ê¸° ìš´ìš©í•´ì•¼ í•©ë‹ˆë‹¤.`
-      : `í˜„ì¬ ë‹¹ì›” ì¬ì •ì´ ${Math.abs(netMonthlyIncome).toLocaleString()}ì› ì ì ìƒíƒœì…ë‹ˆë‹¤. ì£¼íƒë‹´ë³´ëŒ€ì¶œ ì´ì ë° ì´ˆê¸° ì´ì‚¬ ë¶€ëŒ€ ë¹„ìš©ì´ ê²¹ì¹œ ê²°ê³¼ë¡œ ë³´ì´ë©°, ììœ ì…ì¶œê¸ˆ ìì‚°ì—ì„œ ì˜ˆë¹„ë¹„ë¥¼ ìˆ˜í˜ˆí•´ì•¼ í•©ë‹ˆë‹¤.`;
+      ? `ÇöÀç ´ç¿ù ¼ø¼öÀÔ(À×¿© ÀÚ±İ) ${netMonthlyIncome.toLocaleString()}¿øÀº Áï½Ã ¾Æ·¡ÀÇ 3´ë ÀÚ»ê¹èºĞ È²±İ °ø½Ä¿¡ ÅÂ¿ö Á¶±â ¿î¿ëÇØ¾ß ÇÕ´Ï´Ù.`
+      : `ÇöÀç ´ç¿ù ÀçÁ¤ÀÌ ${Math.abs(netMonthlyIncome).toLocaleString()}¿ø ÀûÀÚ »óÅÂÀÔ´Ï´Ù. ÁÖÅÃ´ãº¸´ëÃâ ÀÌÀÚ ¹× ÃÊ±â ÀÌ»ç ºÎ´ë ºñ¿ëÀÌ °ãÄ£ °á°ú·Î º¸ÀÌ¸ç, ÀÚÀ¯ÀÔÃâ±İ ÀÚ»ê¿¡¼­ ¿¹ºñºñ¸¦ ¼öÇ÷ÇØ¾ß ÇÕ´Ï´Ù.`;
 
     return (
       <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-3xl p-6 sm:p-8 border border-indigo-500/20 shadow-xl space-y-6 text-white" id="ai_wealth_report_panel">
@@ -962,10 +1117,10 @@ export default function App() {
             </div>
             <div>
               <h3 className="text-lg font-black text-white flex items-center gap-2">
-                <span>ğŸ¤µ AI ìˆ˜ì„ ìì‚°ê´€ë¦¬ì‚¬ ë¦¬í¬íŠ¸</span>
+                <span>?? AI ¼ö¼® ÀÚ»ê°ü¸®»ç ¸®Æ÷Æ®</span>
                 <span className="bg-emerald-500/20 text-emerald-300 border border-indigo-500/30 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">Premium Advisor</span>
               </h3>
-              <p className="text-xs text-slate-400 mt-0.5">30ëŒ€ ì‹ í˜¼ ë° ë§ë²Œì´ ê°€êµ¬ ìì‚° ê°€ì´ë“œë¼ì¸ í…œí”Œë¦¿ í‘œì¤€ ì ìš©</p>
+              <p className="text-xs text-slate-400 mt-0.5">30´ë ½ÅÈ¥ ¹× ¸Â¹úÀÌ °¡±¸ ÀÚ»ê °¡ÀÌµå¶óÀÎ ÅÛÇÃ¸´ Ç¥ÁØ Àû¿ë</p>
             </div>
           </div>
         </div>
@@ -973,10 +1128,10 @@ export default function App() {
         {/* Advisor Persona Intro */}
         <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-3 text-xs sm:text-sm text-slate-200">
           <p className="font-bold text-emerald-400 text-sm">
-            ğŸ¯ "ìµœì˜ë²” ë‹˜, ê°•ì¬ì€ ë‹˜! ë§ë²Œì´ ë¶€ë¶€ì˜ íƒ„íƒ„í•˜ê³  ê³„íšì ì¸ ìì‚° í˜•ì„±ì„ ìœ„í•œ ìŠ¤ë§ˆíŠ¸ ì¬ì • ì—¬ì •ì„ ì‘ì›í•©ë‹ˆë‹¤!"
+            ?? "ÃÖ¿µ¹ü ´Ô, °­ÀçÀº ´Ô! ¸Â¹úÀÌ ºÎºÎÀÇ ÅºÅºÇÏ°í °èÈ¹ÀûÀÎ ÀÚ»ê Çü¼ºÀ» À§ÇÑ ½º¸¶Æ® ÀçÁ¤ ¿©Á¤À» ÀÀ¿øÇÕ´Ï´Ù!"
           </p>
           <p className="leading-relaxed">
-            ìë…€ ê³„íš ë° ì´ˆë³´ ë¶€ëª¨ ì„¸ëŒ€ì¸ <strong>30ëŒ€ ì¤‘ë°˜ ë§ë²Œì´ ë¶€ë¶€</strong>ì˜ ì¬ì • í•µì‹¬ì€ <span className="text-indigo-300 font-bold">"ë¶€ì±„ ì›ê¸ˆ ìƒí™˜ì„ í†µí•œ ê³ ì •ë¹„ ì ˆê°"</span>ê³¼ <span className="text-orange-300 font-bold">"ìƒì•  ì²« ì£¼íƒ ë§ˆë ¨ ì´í›„ ìì‚° í¬íŠ¸í´ë¦¬ì˜¤ì˜ ì˜ë¦¬í•œ ì²´ì§ˆ ê°œì„ "</span>ì— ìˆìŠµë‹ˆë‹¤. í˜„ì¬ ê°€ê³„ ì¬ì • ì§€í‘œë¥¼ ì „ë¬¸ ìì‚°ê´€ë¦¬ì‚¬ì˜ í”„ë ˆì„ìœ¼ë¡œ ì…ì²´ ë¶„ì„í•´ ë“œë¦¬ê² ìŠµë‹ˆë‹¤.
+            ÀÚ³à °èÈ¹ ¹× ÃÊº¸ ºÎ¸ğ ¼¼´ëÀÎ <strong>30´ë Áß¹İ ¸Â¹úÀÌ ºÎºÎ</strong>ÀÇ ÀçÁ¤ ÇÙ½ÉÀº <span className="text-indigo-300 font-bold">"ºÎÃ¤ ¿ø±İ »óÈ¯À» ÅëÇÑ °íÁ¤ºñ Àı°¨"</span>°ú <span className="text-orange-300 font-bold">"»ı¾Ö Ã¹ ÁÖÅÃ ¸¶·Ã ÀÌÈÄ ÀÚ»ê Æ÷Æ®Æú¸®¿ÀÀÇ ¿µ¸®ÇÑ Ã¼Áú °³¼±"</span>¿¡ ÀÖ½À´Ï´Ù. ÇöÀç °¡°è ÀçÁ¤ ÁöÇ¥¸¦ Àü¹® ÀÚ»ê°ü¸®»çÀÇ ÇÁ·¹ÀÓÀ¸·Î ÀÔÃ¼ ºĞ¼®ÇØ µå¸®°Ú½À´Ï´Ù.
           </p>
         </div>
 
@@ -985,21 +1140,21 @@ export default function App() {
           {/* Diagnostic 1: Variable Costs */}
           <div className="bg-white/5 border border-white/5 rounded-2xl p-4.5 space-y-3.5">
             <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>ğŸ“‰</span> ë‹¹ì›” ({selectedMonth}ì›”) ë³€ë™ë¹„ ì ì •ì„± ì§„ë‹¨
+              <span>??</span> ´ç¿ù ({selectedMonth}¿ù) º¯µ¿ºñ ÀûÁ¤¼º Áø´Ü
             </h4>
             <div className="space-y-3 text-xs">
               <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
-                <span className="text-slate-400">ğŸ” ë‹¹ì›” ì‹ë¹„ ì§€ì¶œ ë¹„ìœ¨:</span>
-                <span className="font-bold font-mono text-emerald-400">{foodRatio}% ({foodCost.toLocaleString()}ì›)</span>
+                <span className="text-slate-400">?? ´ç¿ù ½Äºñ ÁöÃâ ºñÀ²:</span>
+                <span className="font-bold font-mono text-emerald-400">{foodRatio}% ({foodCost.toLocaleString()}¿ø)</span>
               </div>
               <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
-                <span className="text-slate-400">ğŸ¼ ë‹¹ì›” ì–‘ìœ¡/ê¸°íƒ€ ë¹„ìœ¨:</span>
-                <span className="font-bold font-mono text-emerald-400">{childRatio}% ({childCost.toLocaleString()}ì›)</span>
+                <span className="text-slate-400">?? ´ç¿ù ¾çÀ°/±âÅ¸ ºñÀ²:</span>
+                <span className="font-bold font-mono text-emerald-400">{childRatio}% ({childCost.toLocaleString()}¿ø)</span>
               </div>
               
               <div className="pt-2 border-t border-white/5 space-y-1.5 leading-relaxed text-slate-300">
-                <p><strong>[ì‹ë¹„] {foodStatus}:</strong> {foodGuidance}</p>
-                <p><strong>[ì–‘ìœ¡ë¹„] {childStatus}:</strong> {childGuidance}</p>
+                <p><strong>[½Äºñ] {foodStatus}:</strong> {foodGuidance}</p>
+                <p><strong>[¾çÀ°ºñ] {childStatus}:</strong> {childGuidance}</p>
               </div>
             </div>
           </div>
@@ -1007,16 +1162,16 @@ export default function App() {
           {/* Diagnostic 2: Portfolio Asset Allocation */}
           <div className="bg-white/5 border border-white/5 rounded-2xl p-4.5 space-y-3.5">
             <h4 className="text-xs font-bold text-orange-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>ğŸ›ï¸</span> í¬íŠ¸í´ë¦¬ì˜¤ ì•ˆì „ì„± ë° ì˜ˆì ê¸ˆ ê³¼ë‹¤ í¸ì¤‘ ì§„ë‹¨
+              <span>???</span> Æ÷Æ®Æú¸®¿À ¾ÈÀü¼º ¹× ¿¹Àû±İ °ú´Ù ÆíÁß Áø´Ü
             </h4>
             <div className="space-y-3 text-xs leading-relaxed text-slate-300">
               <p>
-                í˜„ì¬ ê°€ê³„ ìì‚°ì˜ <span className="text-red-300 font-bold">{cashPercent}%ê°€ ì˜ˆì ê¸ˆ ë° í˜„ê¸ˆì„± ìì‚°</span>ì— ê³¼ë„í•˜ê²Œ ì¹˜ìš°ì³ ìˆìŠµë‹ˆë‹¤. ì €ê¸ˆë¦¬ í˜„ê¸ˆ ìœ ì¹˜ëŠ” ëŒ€ì¶œ ê¸ˆë¦¬ë³´ë‹¤ ì‹¤ì§ˆ ìˆ˜ìµë¥ ì´ ë‚®ì•„ ì¥ê¸°ì ìœ¼ë¡œ ìì‚° ê°€ì¹˜ê°€ ì ì‹ë©ë‹ˆë‹¤.
+                ÇöÀç °¡°è ÀÚ»êÀÇ <span className="text-red-300 font-bold">{cashPercent}%°¡ ¿¹Àû±İ ¹× Çö±İ¼º ÀÚ»ê</span>¿¡ °úµµÇÏ°Ô Ä¡¿ìÃÄ ÀÖ½À´Ï´Ù. Àú±İ¸® Çö±İ À¯Ä¡´Â ´ëÃâ ±İ¸®º¸´Ù ½ÇÁú ¼öÀÍ·üÀÌ ³·¾Æ Àå±âÀûÀ¸·Î ÀÚ»ê °¡Ä¡°¡ Àá½ÄµË´Ï´Ù.
               </p>
               <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1 text-[11px]">
-                <span className="text-orange-400 font-bold block">ğŸ’¡ AI ìì‚°ê´€ë¦¬ì‚¬ì˜ í™©ê¸ˆ ë¶„ë°° ì œì•ˆ:</span>
-                í˜„ì¬ {LIABILITY_MORTGAGE.name} {LIABILITY_MORTGAGE.amount.toLocaleString()}ì›ì˜ ê¸ˆë¦¬ê°€ <strong>ì—° {LIABILITY_MORTGAGE.rate}%</strong>ë¡œ ìƒë‹¹í•œ ê³ ê¸ˆë¦¬ ë¶€ë‹´ì…ë‹ˆë‹¤. ìì‚°ê´€ë¦¬ ê´€ì ì—ì„œ <span className="text-emerald-300 font-bold">"ëŒ€ì¶œ ì›ê¸ˆ ì¤‘ë„ìƒí™˜ ëŒ€ ë¯¸êµ­ S&P500 ë¶„í•  íˆ¬ì"ë¥¼ 6:4ì˜ í™©ê¸ˆ ë¹„ìœ¨</span>ë¡œ ê°€ì ¸ê°€ì„¸ìš”.
-                ëŒ€ì¶œ ì´ììœ¨ì¸ {LIABILITY_MORTGAGE.rate}%ëŠ” í™•ì •ì  ê³ ìˆ˜ìµìœ¨ê³¼ ê°™ìœ¼ë¯€ë¡œ, ì—¬ìœ ìê¸ˆì´ ìƒê¸¸ ë•Œë§ˆë‹¤ ì ê·¹ ì¤‘ë„ ìƒí™˜í•˜ì—¬ ì´ì ëˆ„ì¶œì„ ì›ì²œ ë‹¨ì¶•í•˜ê³ , ë‚˜ë¨¸ì§€ 40%ëŠ” {bestInvestment ? `í˜„ì¬ í¬íŠ¸í´ë¦¬ì˜¤ì—ì„œ ìˆ˜ìµë¥ ì´ ê°€ì¥ ë†’ì€ ${bestInvestment.name}(${bestInvestment.yieldRate >= 0 ? "+" : ""}${bestInvestment.yieldRate}% ìˆ˜ìµ ì…ì¦ë¨)` : "ë³µë¦¬ íš¨ê³¼ê°€ ê²€ì¦ëœ ìš°ëŸ‰ ì§€ìˆ˜ ì¶”ì¢… ETF"}ì— ì ë¦½ì‹ìœ¼ë¡œ ì§€ì† ë¶„í•  ë§¤ìˆ˜í•˜ëŠ” ê²ƒì´ ì••ë„ì ìœ¼ë¡œ ìœ ë¦¬í•©ë‹ˆë‹¤.
+                <span className="text-orange-400 font-bold block">?? AI ÀÚ»ê°ü¸®»çÀÇ È²±İ ºĞ¹è Á¦¾È:</span>
+                ÇöÀç {LIABILITY_MORTGAGE.name} {LIABILITY_MORTGAGE.amount.toLocaleString()}¿øÀÇ ±İ¸®°¡ <strong>¿¬ {LIABILITY_MORTGAGE.rate}%</strong>·Î »ó´çÇÑ °í±İ¸® ºÎ´ãÀÔ´Ï´Ù. ÀÚ»ê°ü¸® °üÁ¡¿¡¼­ <span className="text-emerald-300 font-bold">"´ëÃâ ¿ø±İ Áßµµ»óÈ¯ ´ë ¹Ì±¹ S&P500 ºĞÇÒ ÅõÀÚ"¸¦ 6:4ÀÇ È²±İ ºñÀ²</span>·Î °¡Á®°¡¼¼¿ä.
+                ´ëÃâ ÀÌÀÚÀ²ÀÎ {LIABILITY_MORTGAGE.rate}%´Â È®Á¤Àû °í¼öÀÍÀ²°ú °°À¸¹Ç·Î, ¿©À¯ÀÚ±İÀÌ »ı±æ ¶§¸¶´Ù Àû±Ø Áßµµ »óÈ¯ÇÏ¿© ÀÌÀÚ ´©ÃâÀ» ¿øÃµ ´ÜÃàÇÏ°í, ³ª¸ÓÁö 40%´Â {bestInvestment ? `ÇöÀç Æ÷Æ®Æú¸®¿À¿¡¼­ ¼öÀÍ·üÀÌ °¡Àå ³ôÀº ${bestInvestment.name}(${bestInvestment.yieldRate >= 0 ? "+" : ""}${bestInvestment.yieldRate}% ¼öÀÍ ÀÔÁõµÊ)` : "º¹¸® È¿°ú°¡ °ËÁõµÈ ¿ì·® Áö¼ö ÃßÁ¾ ETF"}¿¡ Àû¸³½ÄÀ¸·Î Áö¼Ó ºĞÇÒ ¸Å¼öÇÏ´Â °ÍÀÌ ¾ĞµµÀûÀ¸·Î À¯¸®ÇÕ´Ï´Ù.
               </div>
             </div>
           </div>
@@ -1025,13 +1180,13 @@ export default function App() {
         {/* Dynamic Action Plan */}
         <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-5 text-xs sm:text-sm space-y-2">
           <p className="font-bold text-emerald-400 flex items-center gap-2">
-            <span>ğŸš€</span> ì‹¤ì‹œê°„ í”¼ë“œë°± ê¸°ë°˜ ê¸ˆì›” ì¬ì • íˆ¬ì… ê³„íš
+            <span>??</span> ½Ç½Ã°£ ÇÇµå¹é ±â¹İ ±İ¿ù ÀçÁ¤ ÅõÀÔ °èÈ¹
           </p>
           <p className="text-slate-300 leading-relaxed">
             {surplusText} 
             {isSurplus && (
               <span className="block mt-2 text-slate-200 font-bold">
-                ì¶”ì²œ ë°°ë¶„ì•ˆ: ì¤‘ë„ì›ê¸ˆìƒí™˜ì•¡ {(netMonthlyIncome * 0.6).toLocaleString()}ì› (60%) + ë¯¸êµ­ S&P500 ì ë¦½ íˆ¬ì {(netMonthlyIncome * 0.4).toLocaleString()}ì› (40%) íˆ¬ì…ì„ ì„¤ê³„í•˜ì„¸ìš”.
+                ÃßÃµ ¹èºĞ¾È: Áßµµ¿ø±İ»óÈ¯¾× {(netMonthlyIncome * 0.6).toLocaleString()}¿ø (60%) + ¹Ì±¹ S&P500 Àû¸³ ÅõÀÚ {(netMonthlyIncome * 0.4).toLocaleString()}¿ø (40%) ÅõÀÔÀ» ¼³°èÇÏ¼¼¿ä.
               </span>
             )}
           </p>
@@ -1040,8 +1195,8 @@ export default function App() {
     );
   };
 
-  // API Key ì…ë ¥ì°½ì— ì´ ì•”êµ¬í˜¸ë¥¼ ë„£ìœ¼ë©´, ê°œì¸ í‚¤ ëŒ€ì‹  ì„œë²„(Vercel ì„œë²„ë¦¬ìŠ¤ í•¨ìˆ˜)ì— ë³´ê´€ëœ
-  // ê°€ì¡± ê³µìš© ë§ˆìŠ¤í„° í‚¤ë¡œ ìë™ ì „í™˜ëœë‹¤. ì§„ì§œ í‚¤ëŠ” ì„œë²„ í™˜ê²½ë³€ìˆ˜ì—ë§Œ ìˆê³  ë¸Œë¼ìš°ì €ë¡œëŠ” ì ˆëŒ€ ë‚´ë ¤ì˜¤ì§€ ì•ŠëŠ”ë‹¤.
+  // API Key ÀÔ·ÂÃ¢¿¡ ÀÌ ¾Ï±¸È£¸¦ ³ÖÀ¸¸é, °³ÀÎ Å° ´ë½Å ¼­¹ö(Vercel ¼­¹ö¸®½º ÇÔ¼ö)¿¡ º¸°üµÈ
+  // °¡Á· °ø¿ë ¸¶½ºÅÍ Å°·Î ÀÚµ¿ ÀüÈ¯µÈ´Ù. ÁøÂ¥ Å°´Â ¼­¹ö È¯°æº¯¼ö¿¡¸¸ ÀÖ°í ºê¶ó¿ìÀú·Î´Â Àı´ë ³»·Á¿ÀÁö ¾Ê´Â´Ù.
   const handleSendChatMessage = async () => {
     const question = chatInput.trim();
     if (!question || chatLoading) return;
@@ -1074,17 +1229,17 @@ export default function App() {
         totalAssets,
         netWorth
       };
-      const prompt = `ë‹¹ì‹ ì€ í•œêµ­ì–´ë¡œ ë‹µí•˜ëŠ” ê°€ê³„ ì¬ë¬´ ë¶„ì„ ë¹„ì„œì…ë‹ˆë‹¤.
-ì•„ë˜ Supabase ìµœì‹  ìˆ˜ì…/ì§€ì¶œ/ìì‚° ë°ì´í„°ë¥¼ ê·¼ê±°ë¡œë§Œ ë‹µí•˜ì„¸ìš”.
-ê¸ˆì•¡ì€ ì²œ ë‹¨ìœ„ ì½¤ë§ˆì™€ ì› ë‹¨ìœ„ë¡œ í‘œê¸°í•˜ê³ , íŒë‹¨ ê·¼ê±°ë¥¼ ì§§ê²Œ ì„¤ëª…í•˜ì„¸ìš”.
+      const prompt = `´ç½ÅÀº ÇÑ±¹¾î·Î ´äÇÏ´Â °¡°è Àç¹« ºĞ¼® ºñ¼­ÀÔ´Ï´Ù.
+¾Æ·¡ Supabase ÃÖ½Å ¼öÀÔ/ÁöÃâ/ÀÚ»ê µ¥ÀÌÅÍ¸¦ ±Ù°Å·Î¸¸ ´äÇÏ¼¼¿ä.
+±İ¾×Àº Ãµ ´ÜÀ§ ÄŞ¸¶¿Í ¿ø ´ÜÀ§·Î Ç¥±âÇÏ°í, ÆÇ´Ü ±Ù°Å¸¦ Âª°Ô ¼³¸íÇÏ¼¼¿ä.
 
-[ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­]
+[¼öÀÔ/ÁöÃâ ³»¿ª]
 ${JSON.stringify(ledgerContext)}
 
-[ìì‚° ìš”ì•½]
+[ÀÚ»ê ¿ä¾à]
 ${JSON.stringify(assetContext)}
 
-[ì§ˆë¬¸]
+[Áú¹®]
 ${question}`;
 
       const res = await fetch("/api/gemini-chat", {
@@ -1093,11 +1248,11 @@ ${question}`;
         body: JSON.stringify({ prompt })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "ì„œë²„ ìš”ì²­ ì‹¤íŒ¨");
-      setChatMessages(prev => [...prev, { role: "assistant", text: data.text || "ë‹µë³€ì„ ìƒì„±í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤." }]);
+      if (!res.ok) throw new Error(data?.error || "¼­¹ö ¿äÃ» ½ÇÆĞ");
+      setChatMessages(prev => [...prev, { role: "assistant", text: data.text || "´äº¯À» »ı¼ºÇÏÁö ¸øÇß½À´Ï´Ù." }]);
     } catch (error: any) {
       console.error(error);
-      setChatMessages(prev => [...prev, { role: "assistant", text: `Gemini API í˜¸ì¶œ ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤. ${error?.message || "Vercel í™˜ê²½ë³€ìˆ˜ë¥¼ í™•ì¸í•´ ì£¼ì„¸ìš”."}` }]);
+      setChatMessages(prev => [...prev, { role: "assistant", text: `Gemini API È£Ãâ Áß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù. ${error?.message || "Vercel È¯°æº¯¼ö¸¦ È®ÀÎÇØ ÁÖ¼¼¿ä."}` }]);
     } finally {
       setChatLoading(false);
     }
@@ -1108,16 +1263,16 @@ ${question}`;
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = async (evt) => {
+    reader.onload = (evt) => {
       try {
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
 
         const allParsedLedgerItems: LedgerItem[] = [];
         let anySheetParsed = false;
-        // ì‹œíŠ¸ê°€ ì—¬ëŸ¬ ê°œ(ì˜ˆ: ì˜ë²”/ì¬ì€)ì¼ ë•Œ ê° ì‹œíŠ¸ì˜ í–‰ ì¸ë±ìŠ¤ê°€ 0ë¶€í„° ë‹¤ì‹œ ì‹œì‘ë˜ë¯€ë¡œ
-        // "Date.now() + í–‰ ì¸ë±ìŠ¤"ë§Œìœ¼ë¡œëŠ” ì„œë¡œ ë‹¤ë¥¸ ì‹œíŠ¸ì˜ ê°™ì€ í–‰ ë²ˆí˜¸ë¼ë¦¬ idê°€ ì¶©ëŒí•œë‹¤.
-        // ì—…ë¡œë“œ ì „ì²´ì—ì„œ ì ˆëŒ€ ê²¹ì¹˜ì§€ ì•Šë„ë¡ ì „ì—­ ì¹´ìš´í„°ë¥¼ ë³„ë„ë¡œ ë‘”ë‹¤.
+        // ½ÃÆ®°¡ ¿©·¯ °³(¿¹: ¿µ¹ü/ÀçÀº)ÀÏ ¶§ °¢ ½ÃÆ®ÀÇ Çà ÀÎµ¦½º°¡ 0ºÎÅÍ ´Ù½Ã ½ÃÀÛµÇ¹Ç·Î
+        // "Date.now() + Çà ÀÎµ¦½º"¸¸À¸·Î´Â ¼­·Î ´Ù¸¥ ½ÃÆ®ÀÇ °°Àº Çà ¹øÈ£³¢¸® id°¡ Ãæµ¹ÇÑ´Ù.
+        // ¾÷·Îµå ÀüÃ¼¿¡¼­ Àı´ë °ãÄ¡Áö ¾Êµµ·Ï Àü¿ª Ä«¿îÅÍ¸¦ º°µµ·Î µĞ´Ù.
         let globalRowCounter = 0;
 
         for (const wsname of wb.SheetNames) {
@@ -1134,9 +1289,9 @@ ${question}`;
             let hasAmount = false;
             for (let c = 0; c < row.length; c++) {
               const val = String(row[c] || "").trim().toLowerCase();
-              if (["ë‚ ì§œ", "ì¼ì", "ì¼ì‹œ", "date", "time"].some(k => val.includes(k))) hasDate = true;
-              if (["êµ¬ë¶„", "íƒ€ì…", "êµ¬ë¶„ìœ í˜•", "type", "ìˆ˜ì…ì§€ì¶œ", "ìˆ˜ì…/ì§€ì¶œ"].some(k => val.includes(k))) hasType = true;
-              if (["ê¸ˆì•¡", "ì›", "amount", "price"].some(k => val.includes(k))) hasAmount = true;
+              if (["³¯Â¥", "ÀÏÀÚ", "ÀÏ½Ã", "date", "time"].some(k => val.includes(k))) hasDate = true;
+              if (["±¸ºĞ", "Å¸ÀÔ", "±¸ºĞÀ¯Çü", "type", "¼öÀÔÁöÃâ", "¼öÀÔ/ÁöÃâ"].some(k => val.includes(k))) hasType = true;
+              if (["±İ¾×", "¿ø", "amount", "price"].some(k => val.includes(k))) hasAmount = true;
             }
             if (hasDate && hasType && hasAmount) {
               headerRowIdx = r;
@@ -1144,9 +1299,9 @@ ${question}`;
             }
           }
 
-          const isLedgerSheetName = wsname.includes("ë‚´ì—­") || wsname.includes("ê°€ê³„ë¶€") || wsname.includes("ledger");
-          // ì‹œíŠ¸ ì´ë¦„ì´ "ê°€ê³„ë¶€ ë‚´ì—­" ê°™ì€ ì¼ë°˜ ëª…ì¹­ì´ ì•„ë‹ˆë¼ "ì˜ë²”"/"ì¬ì€"ì²˜ëŸ¼ ì‚¬ëŒ ì´ë¦„ì„ ë”´ ì‹œíŠ¸ë¼ë©´,
-          // ê·¸ ì‹œíŠ¸ì—ì„œ ë‚˜ì˜¨ ëª¨ë“  ë‚´ì—­ì˜ ì§€ì¶œìë¥¼ í•´ë‹¹ ì‹œíŠ¸ ì´ë¦„ìœ¼ë¡œ ìë™ ì§€ì •í•œë‹¤.
+          const isLedgerSheetName = wsname.includes("³»¿ª") || wsname.includes("°¡°èºÎ") || wsname.includes("ledger");
+          // ½ÃÆ® ÀÌ¸§ÀÌ "°¡°èºÎ ³»¿ª" °°Àº ÀÏ¹İ ¸íÄªÀÌ ¾Æ´Ï¶ó "¿µ¹ü"/"ÀçÀº"Ã³·³ »ç¶÷ ÀÌ¸§À» µı ½ÃÆ®¶ó¸é,
+          // ±× ½ÃÆ®¿¡¼­ ³ª¿Â ¸ğµç ³»¿ªÀÇ ÁöÃâÀÚ¸¦ ÇØ´ç ½ÃÆ® ÀÌ¸§À¸·Î ÀÚµ¿ ÁöÁ¤ÇÑ´Ù.
           const sheetSpenderTag = isLedgerSheetName ? "" : wsname.trim();
 
           if (headerRowIdx !== -1 || isLedgerSheetName) {
@@ -1164,13 +1319,13 @@ ${question}`;
 
             for (let c = 0; c < headerRow.length; c++) {
               const val = String(headerRow[c] || "").trim().toLowerCase();
-              if (["ë‚ ì§œ", "ì¼ì", "ì¼ì‹œ", "date", "time"].some(k => val.includes(k))) colIndices.date = c;
-              if (["êµ¬ë¶„", "íƒ€ì…", "êµ¬ë¶„ìœ í˜•", "type", "ìˆ˜ì…ì§€ì¶œ", "ìˆ˜ì…/ì§€ì¶œ"].some(k => val.includes(k))) colIndices.type = c;
-              if (["ì¹´í…Œê³ ë¦¬", "ë¶„ë¥˜", "ëŒ€ë¶„ë¥˜", "ì†Œë¶„ë¥˜", "category"].some(k => val.includes(k))) colIndices.category = c;
-              if (["ë‚´ìš©", "ê±°ë˜ì²˜", "ìƒì„¸", "ì ìš”", "content"].some(k => val.includes(k))) colIndices.content = c;
-              if (["ë©”ëª¨", "memo", "ë¹„ê³ ", "note"].some(k => val.includes(k))) colIndices.memo = c;
-              if (["ê²°ì œìˆ˜ë‹¨", "ì§€ê¸‰ìˆ˜ë‹¨", "ê²°ì œ", "ì¹´ë“œ", "payment", "method"].some(k => val.includes(k))) colIndices.paymentMethod = c;
-              if (["ê¸ˆì•¡", "ì›", "amount", "price"].some(k => val.includes(k))) colIndices.amount = c;
+              if (["³¯Â¥", "ÀÏÀÚ", "ÀÏ½Ã", "date", "time"].some(k => val.includes(k))) colIndices.date = c;
+              if (["±¸ºĞ", "Å¸ÀÔ", "±¸ºĞÀ¯Çü", "type", "¼öÀÔÁöÃâ", "¼öÀÔ/ÁöÃâ"].some(k => val.includes(k))) colIndices.type = c;
+              if (["Ä«Å×°í¸®", "ºĞ·ù", "´ëºĞ·ù", "¼ÒºĞ·ù", "category"].some(k => val.includes(k))) colIndices.category = c;
+              if (["³»¿ë", "°Å·¡Ã³", "»ó¼¼", "Àû¿ä", "content"].some(k => val.includes(k))) colIndices.content = c;
+              if (["¸Ş¸ğ", "memo", "ºñ°í", "note"].some(k => val.includes(k))) colIndices.memo = c;
+              if (["°áÁ¦¼ö´Ü", "Áö±Ş¼ö´Ü", "°áÁ¦", "Ä«µå", "payment", "method"].some(k => val.includes(k))) colIndices.paymentMethod = c;
+              if (["±İ¾×", "¿ø", "amount", "price"].some(k => val.includes(k))) colIndices.amount = c;
             }
 
             const parsedItems: LedgerItem[] = [];
@@ -1186,11 +1341,11 @@ ${question}`;
               const rawMemo = colIndices.memo !== -1 ? row[colIndices.memo] : undefined;
               const rawPaymentMethod = colIndices.paymentMethod !== -1 ? row[colIndices.paymentMethod] : undefined;
 
-              // "ì´ì²´" ì¤‘ì—ì„œë„ ë‚´ ê³„ì¢Œë¼ë¦¬ ì˜®ê¸´ ê²ƒ(ì˜ˆ: ëŒ€ë¶„ë¥˜ê°€ "ë‚´ê³„ì¢Œì´ì²´")ë§Œ ì‹¤ì œ ìˆ˜ì…/ì§€ì¶œì´ ì•„ë‹ˆë¯€ë¡œ ì œì™¸í•œë‹¤.
-              // ë‹¤ë¥¸ ì‚¬ëŒì—ê²Œ ë³´ë‚´ê±°ë‚˜ ë°›ì€ ì´ì²´(ì˜ˆ: ì§€ì¸ì—ê²Œ ì†¡ê¸ˆ)ëŠ” ì‹¤ì œ ìê¸ˆ ì´ë™ì´ë¯€ë¡œ ê¸ˆì•¡ ë¶€í˜¸ì— ë”°ë¼ ì§€ì¶œ/ìˆ˜ì…ìœ¼ë¡œ ë°˜ì˜í•œë‹¤.
+              // "ÀÌÃ¼" Áß¿¡¼­µµ ³» °èÁÂ³¢¸® ¿Å±ä °Í(¿¹: ´ëºĞ·ù°¡ "³»°èÁÂÀÌÃ¼")¸¸ ½ÇÁ¦ ¼öÀÔ/ÁöÃâÀÌ ¾Æ´Ï¹Ç·Î Á¦¿ÜÇÑ´Ù.
+              // ´Ù¸¥ »ç¶÷¿¡°Ô º¸³»°Å³ª ¹ŞÀº ÀÌÃ¼(¿¹: ÁöÀÎ¿¡°Ô ¼Û±İ)´Â ½ÇÁ¦ ÀÚ±İ ÀÌµ¿ÀÌ¹Ç·Î ±İ¾× ºÎÈ£¿¡ µû¶ó ÁöÃâ/¼öÀÔÀ¸·Î ¹İ¿µÇÑ´Ù.
               if (rawCategory !== undefined) {
                 const transferCategoryCheck = String(rawCategory).trim();
-                if (["ë‚´ê³„ì¢Œ", "ë‚´ ê³„ì¢Œ"].some(k => transferCategoryCheck.includes(k))) continue;
+                if (["³»°èÁÂ", "³» °èÁÂ"].some(k => transferCategoryCheck.includes(k))) continue;
               }
 
               if (rawDate === undefined && rawAmount === undefined) continue;
@@ -1207,17 +1362,17 @@ ${question}`;
               let amount = Math.abs(originalAmount);
               if (amount === 0) continue;
 
-              let type: "ìˆ˜ì…" | "ì§€ì¶œ" = "ì§€ì¶œ";
+              let type: "¼öÀÔ" | "ÁöÃâ" = "ÁöÃâ";
               if (rawType !== undefined) {
                 const tStr = String(rawType).trim();
-                if (tStr.includes("ìˆ˜ì…") || tStr.toLowerCase() === "income" || tStr.toLowerCase() === "deposit") {
-                  type = "ìˆ˜ì…";
+                if (tStr.includes("¼öÀÔ") || tStr.toLowerCase() === "income" || tStr.toLowerCase() === "deposit") {
+                  type = "¼öÀÔ";
                 }
               }
 
-              // [í•µì‹¬ ìš”êµ¬ì‚¬í•­] íƒ€ì…ì´ 'ì§€ì¶œ'ì´ë”ë¼ë„ ê¸ˆì•¡ì´ 0ë³´ë‹¤ í° ì–‘ìˆ˜(ê¸ˆì•¡ > 0)ì¸ í•­ëª©ì€ ì§€ì¶œ ë¦¬ìŠ¤íŠ¸ì—ì„œ ì œì™¸í•˜ê³  'ìˆ˜ì… ë‚´ì—­'ìœ¼ë¡œ ìë™ ì´ë™/ë¶„ë¥˜
-              if (type === "ì§€ì¶œ" && originalAmount > 0) {
-                type = "ìˆ˜ì…";
+              // [ÇÙ½É ¿ä±¸»çÇ×] Å¸ÀÔÀÌ 'ÁöÃâ'ÀÌ´õ¶óµµ ±İ¾×ÀÌ 0º¸´Ù Å« ¾ç¼ö(±İ¾× > 0)ÀÎ Ç×¸ñÀº ÁöÃâ ¸®½ºÆ®¿¡¼­ Á¦¿ÜÇÏ°í '¼öÀÔ ³»¿ª'À¸·Î ÀÚµ¿ ÀÌµ¿/ºĞ·ù
+              if (type === "ÁöÃâ" && originalAmount > 0) {
+                type = "¼öÀÔ";
               }
 
               let dateStr = "";
@@ -1253,8 +1408,8 @@ ${question}`;
                 monthStr = dateStr.substring(0, 7);
               }
 
-              const category = rawCategory ? String(rawCategory).trim() : (type === "ìˆ˜ì…" ? "ê¸‰ì—¬" : "ì‹ë¹„");
-              const content = rawContent ? String(rawContent).trim() : `${category} í•­ëª©`;
+              const category = rawCategory ? String(rawCategory).trim() : (type === "¼öÀÔ" ? "±Ş¿©" : "½Äºñ");
+              const content = rawContent ? String(rawContent).trim() : `${category} Ç×¸ñ`;
               const memo = rawMemo !== undefined && rawMemo !== null ? String(rawMemo).trim() : "";
               const paymentMethod = rawPaymentMethod !== undefined && rawPaymentMethod !== null ? String(rawPaymentMethod).trim() : "";
 
@@ -1281,9 +1436,9 @@ ${question}`;
         }
 
         if (allParsedLedgerItems.length > 0) {
-          // ì›ë³¸ ë‚´ì—­ì„ ìˆëŠ” ê·¸ëŒ€ë¡œ ë°˜ì˜í•œë‹¤. ë‚ ì§œ/ë¶„ë¥˜/ë‚´ìš©/ê¸ˆì•¡ì´ ê°™ë”ë¼ë„ ì‹¤ì œë¡œëŠ”
-          // ì„œë¡œ ë‹¤ë¥¸ ê±°ë˜(ê°™ì€ ê°€ë§¹ì ì—ì„œì˜ ë°˜ë³µ ê²°ì œ, ì¹´ë“œ+í¬ì¸íŠ¸ ë¶„í• ê²°ì œ ë“±)ì¼ ìˆ˜ ìˆìœ¼ë¯€ë¡œ
-          // ì„ì˜ë¡œ "ì¤‘ë³µ"ì´ë¼ ê°„ì£¼í•´ ê±¸ëŸ¬ë‚´ì§€ ì•ŠëŠ”ë‹¤.
+          // ¿øº» ³»¿ªÀ» ÀÖ´Â ±×´ë·Î ¹İ¿µÇÑ´Ù. ³¯Â¥/ºĞ·ù/³»¿ë/±İ¾×ÀÌ °°´õ¶óµµ ½ÇÁ¦·Î´Â
+          // ¼­·Î ´Ù¸¥ °Å·¡(°°Àº °¡¸ÍÁ¡¿¡¼­ÀÇ ¹İº¹ °áÁ¦, Ä«µå+Æ÷ÀÎÆ® ºĞÇÒ°áÁ¦ µî)ÀÏ ¼ö ÀÖÀ¸¹Ç·Î
+          // ÀÓÀÇ·Î "Áßº¹"ÀÌ¶ó °£ÁÖÇØ °É·¯³»Áö ¾Ê´Â´Ù.
           const uniqueItems: LedgerItem[] = allParsedLedgerItems;
 
           setLedger(uniqueItems); // Overwrite completely with the freshly uploaded ledger
@@ -1296,77 +1451,64 @@ ${question}`;
             }
           }
 
-          const cloudOk = await syncLedgerReplaceToSupabase(uniqueItems);
-          if (!cloudOk) {
-            setCloudSaveError("í´ë¼ìš°ë“œ ì €ì¥ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.");
-            alert("í´ë¼ìš°ë“œ ì €ì¥ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.");
-          } else {
-            setCloudSaveError("");
-          }
+          syncLedgerReplaceToSupabase(uniqueItems).then(ok => {
+            if (!ok) {
+              alert("?? ÀÌ ºê¶ó¿ìÀú¿¡´Â ¹İ¿µµÆÁö¸¸, Supabase ÀúÀå¿¡ ½ÇÆĞÇß½À´Ï´Ù. °³¹ßÀÚ µµ±¸ ÄÜ¼ÖÀ» È®ÀÎÇØ ÁÖ¼¼¿ä.");
+            }
+          });
           updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
 
-          alert(`ğŸ‰ ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ ${uniqueItems.length}ê±´ì´ ì„±ê³µì ìœ¼ë¡œ ì—°ë™ë˜ì—ˆìŠµë‹ˆë‹¤!`);
+          alert(`?? ¼öÀÔ/ÁöÃâ ³»¿ª ${uniqueItems.length}°ÇÀÌ ¼º°øÀûÀ¸·Î ¿¬µ¿µÇ¾ú½À´Ï´Ù!`);
         } else {
-          alert("ì—…ë¡œë“œëœ íŒŒì¼ì—ì„œ ìœ íš¨í•œ ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ ì‹œíŠ¸ë¥¼ ë°œê²¬í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤.");
+          alert("¾÷·ÎµåµÈ ÆÄÀÏ¿¡¼­ À¯È¿ÇÑ ¼öÀÔ/ÁöÃâ ³»¿ª ½ÃÆ®¸¦ ¹ß°ßÇÏÁö ¸øÇß½À´Ï´Ù.");
         }
       } catch (error) {
         console.error(error);
-        alert("ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ íŒŒì‹± ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.");
+        alert("¼öÀÔ/ÁöÃâ ³»¿ª ÆÄ½Ì Áß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.");
       }
     };
     reader.readAsBinaryString(file);
   };
 
   const handleAssetsExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    const parseAssetAmountCell = (value: unknown) => {
-      if (typeof value === "number" && Number.isFinite(value)) {
-        return Math.round(Math.abs(value));
-      }
-      if (typeof value === "string") {
-        const cleaned = value.replace(/,/g, "").replace(/ì›/g, "").replace(/\s/g, "").trim();
-        if (!cleaned || cleaned === "-") return null;
-        const parsed = Number(cleaned);
-        return Number.isFinite(parsed) ? Math.round(Math.abs(parsed)) : null;
-      }
-      return null;
-    };
-
-    const getOwnerTagFromFileName = (name: string) => {
-      const upper = name.toUpperCase();
-      if (upper.includes("[JE]")) return "[ì¬ì€] ";
-      if (upper.includes("[YB]")) return "[ì˜ë²”] ";
-      return "";
-    };
-
-    setFreeAssets([]);
-    setSavingsAssets([]);
-    setElectronicAssets([]);
-    setInvestmentAssets([]);
-    freeAssetsRef.current = [];
-    investmentAssetsRef.current = [];
-    setAssetsFileName(null);
-
-    files.forEach((file) => {
     const reader = new FileReader();
-    reader.onload = async (evt) => {
+    reader.onload = (evt) => {
       try {
         const bstr = evt.target?.result;
         const wb = read(bstr, { type: "binary" });
 
-        // ì‹œíŠ¸ë³„ë¡œ íŒŒì‹±í•œ ê²°ê³¼ë¥¼ ì—¬ê¸°ì— ëˆ„ì í•œë‹¤(ì´ì „ì—” ì‹œíŠ¸ë§ˆë‹¤ ë®ì–´ì¨ì„œ ì—¬ëŸ¬ ëª…ì˜ ì‹œíŠ¸ê°€ ìˆìœ¼ë©´
-        // ë§ˆì§€ë§‰ ì‹œíŠ¸ë§Œ ë‚¨ëŠ” ë²„ê·¸ê°€ ìˆì—ˆìŒ - ë¶€ë¶€ ê°ì ì‹œíŠ¸ë¥¼ í•©ì‚°í•˜ë ¤ë©´ ëˆ„ì ì´ í•„ìˆ˜).
-        const combinedFree: typeof ASSET_FREE_DEPOSITS = [];
-        const combinedInvestMap = new Map<string, InvestmentItem>();
-        let combinedMortgageAmount: number | null = null;
-        let combinedMortgageRate: number | null = null;
+        const fallbackAssetYear = Number((uniqueMonths[uniqueMonths.length - 1] || selectedMonth || String(new Date().getFullYear())).slice(0, 4)) || new Date().getFullYear();
+        const parsedAssetSnapshots: Record<string, AssetSnapshot> = {};
+
+        const getWritableSnapshot = (monthKey: string) => {
+          if (!parsedAssetSnapshots[monthKey]) parsedAssetSnapshots[monthKey] = emptyAssetSnapshot();
+          return parsedAssetSnapshots[monthKey];
+        };
+
+        const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null) => {
+          const snapshot = getWritableSnapshot(monthKey);
+          free.forEach(f => {
+            if (!snapshot.freeAssets.some(existing => existing.name === f.name)) snapshot.freeAssets.push(f);
+          });
+          investments.forEach(inv => {
+            const existingIdx = snapshot.investmentAssets.findIndex(existing => existing.name === inv.name);
+            if (existingIdx === -1) snapshot.investmentAssets.push(inv);
+            else snapshot.investmentAssets[existingIdx] = inv;
+          });
+          if (mortgageAmount) {
+            snapshot.liability = { amount: mortgageAmount, rate: mortgageRate ?? snapshot.liability?.rate ?? null };
+          } else if (mortgageRate) {
+            snapshot.liability = { amount: snapshot.liability?.amount ?? LIABILITY_MORTGAGE.amount, rate: mortgageRate };
+          }
+        };
 
         let assetsSuccessCount = 0;
         let anySheetParsed = false;
 
-        const genericAssetSheetKeywords = ["í˜„í™©", "ìì‚°", "ì¬ë¬´", "ë±…ìƒ", "ê³ ê°", "asset"];
+        const genericAssetSheetKeywords = ["ÇöÈ²", "ÀÚ»ê", "Àç¹«", "¹ğ»ø", "°í°´", "asset"];
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
@@ -1375,15 +1517,15 @@ ${question}`;
 
           const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
           const textContent = rows.map(r => r.join(" ")).join("\n").toLowerCase();
+          const sheetMonthKey = getAssetSheetMonthKey(wsname, fallbackAssetYear) || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
 
-          // ì‹œíŠ¸ ì´ë¦„ì´ "í˜„í™©/ìì‚°/ì¬ë¬´/ë±…ìƒ/ê³ ê°/asset" ê°™ì€ ì¼ë°˜ êµ¬ì¡° í‚¤ì›Œë“œê°€ ì•„ë‹ˆë¼ë©´
-          // (ì˜ˆ: "ì˜ë²”", "ì¬ì€") ì‹¤ì œ ëª…ì˜ë¡œ ê°„ì£¼í•˜ì—¬ ê³„ì¢Œëª… ì•ì— ëª…ì˜ íƒœê·¸ë¥¼ ë¶™ì¸ë‹¤.
-          const ownerTag = getOwnerTagFromFileName(file.name) || (isAssetsSheetName ? "" : `[${wsname}] `);
+          // ¹ğ»øÇöÈ²(¿µ¹ü)8¿ùÃ³·³ ¿ùº°/¸íÀÇº° ½ÃÆ®¸é ¿ù°ú ¸íÀÇ¸¦ ºĞ¸®ÇØ ÀúÀåÇÑ´Ù.
+          const ownerTag = getOwnerPrefixFromSheetName(wsname) || (isAssetsSheetName ? "" : `[${wsname}] `);
 
-          if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["ê³ ê°ì •ë³´", "ì¬ë¬´í˜„í™©", "ìì‚°", "ë¶€ì±„"].some(k => val.includes(k))))) {
+          if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["°í°´Á¤º¸", "Àç¹«ÇöÈ²", "ÀÚ»ê", "ºÎÃ¤"].some(k => val.includes(k))))) {
             let parsedStructured = false;
 
-            if (textContent.includes("ê³ ê°ì •ë³´") || textContent.includes("ì¬ë¬´í˜„í™©") || textContent.includes("íˆ¬ìí˜„í™©") || textContent.includes("ëŒ€ì¶œí˜„í™©")) {
+            if (textContent.includes("°í°´Á¤º¸") || textContent.includes("Àç¹«ÇöÈ²") || textContent.includes("ÅõÀÚÇöÈ²") || textContent.includes("´ëÃâÇöÈ²")) {
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newInvestments: typeof ASSET_INVESTMENTS = [];
               let mortgageAmount: number | null = null;
@@ -1391,16 +1533,16 @@ ${question}`;
 
               let currentCategory = "";
 
-              // "N.ì¬ë¬´í˜„í™©" í‘œ í—¤ë”(í•­ëª©/ìƒí’ˆëª…/ê¸ˆì•¡ì´ ìì‚°Â·ë¶€ì±„ ë‘ ë¸”ë¡ìœ¼ë¡œ ë‚˜ë€íˆ ë°°ì¹˜ë¨)ë¥¼ ì°¾ëŠ”ë‹¤.
-              // í•­ëª©(êµ¬ë¶„) ê°’ì€ ê° ì¹´í…Œê³ ë¦¬ì˜ ì²« í–‰ì—ë§Œ í‘œì‹œë˜ê³  ì´í›„ í–‰ì€ ê³µë€ì´ë¯€ë¡œ,
-              // ë°˜ë“œì‹œ "ë§ˆì§€ë§‰ìœ¼ë¡œ ì½ì€ í•­ëª© ê°’"ì„ ë‹¤ìŒ í–‰ì— ì´ì–´ë°›ì•„ì•¼(carry-forward) ê° ì¹´í…Œê³ ë¦¬ì˜ ì²« í–‰ì„ ë†“ì¹˜ì§€ ì•ŠëŠ”ë‹¤.
+              // "N.Àç¹«ÇöÈ²" Ç¥ Çì´õ(Ç×¸ñ/»óÇ°¸í/±İ¾×ÀÌ ÀÚ»ê¡¤ºÎÃ¤ µÎ ºí·ÏÀ¸·Î ³ª¶õÈ÷ ¹èÄ¡µÊ)¸¦ Ã£´Â´Ù.
+              // Ç×¸ñ(±¸ºĞ) °ªÀº °¢ Ä«Å×°í¸®ÀÇ Ã¹ Çà¿¡¸¸ Ç¥½ÃµÇ°í ÀÌÈÄ ÇàÀº °ø¶õÀÌ¹Ç·Î,
+              // ¹İµå½Ã "¸¶Áö¸·À¸·Î ÀĞÀº Ç×¸ñ °ª"À» ´ÙÀ½ Çà¿¡ ÀÌ¾î¹Ş¾Æ¾ß(carry-forward) °¢ Ä«Å×°í¸®ÀÇ Ã¹ ÇàÀ» ³õÄ¡Áö ¾Ê´Â´Ù.
               let assetHeaderRowIdx = -1;
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
-                const hasItem = row.some(c => String(c || "").trim() === "í•­ëª©");
-                const hasName = row.some(c => String(c || "").trim() === "ìƒí’ˆëª…");
-                const hasAmount = row.some(c => String(c || "").trim() === "ê¸ˆì•¡");
+                const hasItem = row.some(c => String(c || "").trim() === "Ç×¸ñ");
+                const hasName = row.some(c => String(c || "").trim() === "»óÇ°¸í");
+                const hasAmount = row.some(c => String(c || "").trim() === "±İ¾×");
                 if (hasItem && hasName && hasAmount) {
                   assetHeaderRowIdx = r;
                   break;
@@ -1416,9 +1558,9 @@ ${question}`;
                 const amountCols: number[] = [];
                 headerRow.forEach((cell, i) => {
                   const v = String(cell || "").trim();
-                  if (v === "í•­ëª©") itemCols.push(i);
-                  else if (v === "ìƒí’ˆëª…") nameCols.push(i);
-                  else if (v === "ê¸ˆì•¡") amountCols.push(i);
+                  if (v === "Ç×¸ñ") itemCols.push(i);
+                  else if (v === "»óÇ°¸í") nameCols.push(i);
+                  else if (v === "±İ¾×") amountCols.push(i);
                 });
 
                 const assetItemCol = itemCols[0];
@@ -1440,27 +1582,28 @@ ${question}`;
                       currentCategory = itemCell.trim();
                     }
 
-                    if (currentCategory.includes("ì´ìì‚°")) {
+                    if (currentCategory.includes("ÃÑÀÚ»ê")) {
                       break;
                     }
 
                     const nameCell = assetNameCol !== undefined ? row[assetNameCol] : undefined;
                     const amountCell = assetAmountCol !== undefined ? row[assetAmountCol] : undefined;
-                    const amount = parseAssetAmountCell(amountCell);
 
-                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && amount !== null) {
+                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && typeof amountCell === "number") {
                       const name = ownerTag + nameCell.trim();
+                      // ¿ø ´ÜÀ§´Â ¼Ò¼öÁ¡ÀÌ ¾ø¾î¾ß ÇÏ¹Ç·Î(ÀºÇà exportÀÇ ¹İ¿Ã¸² ÀÜ¿©°ª µîÀ¸·Î ¼Ò¼öÁ¡ÀÌ ºÙ´Â °æ¿ì°¡ ÀÖÀ½) Á¤¼ö·Î ¹İ¿Ã¸²ÇÑ´Ù.
+                      const amount = Math.round(Math.abs(amountCell));
 
-                      if (currentCategory.includes("ììœ ì…ì¶œê¸ˆ") || currentCategory.includes("í˜„ê¸ˆ") || currentCategory.includes("ì €ì¶•ì„±") || currentCategory.includes("ì „ìê¸ˆìœµ")) {
+                      if (currentCategory.includes("ÀÚÀ¯ÀÔÃâ±İ") || currentCategory.includes("Çö±İ") || currentCategory.includes("ÀúÃà¼º") || currentCategory.includes("ÀüÀÚ±İÀ¶")) {
                         if (!newFree.some(f => f.name === name)) {
                           newFree.push({ name, amount });
                         }
-                      } else if (currentCategory.includes("íˆ¬ìì„±") || currentCategory.includes("ì£¼ì‹")) {
+                      } else if (currentCategory.includes("ÅõÀÚ¼º") || currentCategory.includes("ÁÖ½Ä")) {
                         if (!investMap.has(name)) {
                           investMap.set(name, { name, principal: amount, appraised: amount, yieldRate: 0 });
                         }
                       }
-                      // ë³´í—˜ ìì‚° / ì—°ê¸ˆ ìì‚° / ë¶€ë™ì‚° / ë™ì‚° / ê¸°íƒ€ ì‹¤ë¬¼ ìì‚° / ì‹ íƒ ìì‚°ì€ í˜„ê¸ˆì„±Â·íˆ¬ìì„± ìì‚°ì´ ì•„ë‹ˆë¯€ë¡œ ì œì™¸
+                      // º¸Çè ÀÚ»ê / ¿¬±İ ÀÚ»ê / ºÎµ¿»ê / µ¿»ê / ±âÅ¸ ½Ç¹° ÀÚ»ê / ½ÅÅ¹ ÀÚ»êÀº Çö±İ¼º¡¤ÅõÀÚ¼º ÀÚ»êÀÌ ¾Æ´Ï¹Ç·Î Á¦¿Ü
                     }
                   }
 
@@ -1471,35 +1614,34 @@ ${question}`;
                     }
                     const liabNameCell = liabNameCol !== undefined ? row[liabNameCol] : undefined;
                     const liabAmountCell = liabAmountCol !== undefined ? row[liabAmountCol] : undefined;
-                    const liabAmount = parseAssetAmountCell(liabAmountCell);
                     if (
-                      liabAmount !== null &&
-                      ((typeof liabNameCell === "string" && (liabNameCell.includes("ì£¼íƒë‹´ë³´ëŒ€ì¶œ") || liabNameCell.includes("ì£¼ë‹´ëŒ€"))) || currentLiabCategory.includes("ì¥ê¸°ëŒ€ì¶œ"))
+                      typeof liabAmountCell === "number" &&
+                      ((typeof liabNameCell === "string" && (liabNameCell.includes("ÁÖÅÃ´ãº¸´ëÃâ") || liabNameCell.includes("ÁÖ´ã´ë"))) || currentLiabCategory.includes("Àå±â´ëÃâ"))
                     ) {
-                      mortgageAmount = liabAmount;
+                      mortgageAmount = Math.abs(liabAmountCell);
                     }
                   }
                 }
               }
 
-              // "N.íˆ¬ìí˜„í™©" ìƒì„¸ í‘œ(ìƒí’ˆëª…/íˆ¬ìì›ê¸ˆ/í‰ê°€ê¸ˆì•¡/ìˆ˜ìµë¥ )ì—ì„œ ë” ì •í™•í•œ ê°’ì„ ì°¾ì•„ ë®ì–´ì“´ë‹¤.
+              // "N.ÅõÀÚÇöÈ²" »ó¼¼ Ç¥(»óÇ°¸í/ÅõÀÚ¿ø±İ/Æò°¡±İ¾×/¼öÀÍ·ü)¿¡¼­ ´õ Á¤È®ÇÑ °ªÀ» Ã£¾Æ µ¤¾î¾´´Ù.
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
-                const hasPrincipalHeader = row.some(c => String(c || "").trim() === "íˆ¬ìì›ê¸ˆ");
-                const hasAppraisedHeader = row.some(c => String(c || "").trim() === "í‰ê°€ê¸ˆì•¡");
+                const hasPrincipalHeader = row.some(c => String(c || "").trim() === "ÅõÀÚ¿ø±İ");
+                const hasAppraisedHeader = row.some(c => String(c || "").trim() === "Æò°¡±İ¾×");
                 if (!hasPrincipalHeader || !hasAppraisedHeader) continue;
 
-                const nameColIdx = row.findIndex(c => String(c || "").trim() === "ìƒí’ˆëª…");
-                const principalColIdx = row.findIndex(c => String(c || "").trim() === "íˆ¬ìì›ê¸ˆ");
-                const appraisedColIdx = row.findIndex(c => String(c || "").trim() === "í‰ê°€ê¸ˆì•¡");
-                const yieldColIdx = row.findIndex(c => String(c || "").trim() === "ìˆ˜ìµë¥ ");
+                const nameColIdx = row.findIndex(c => String(c || "").trim() === "»óÇ°¸í");
+                const principalColIdx = row.findIndex(c => String(c || "").trim() === "ÅõÀÚ¿ø±İ");
+                const appraisedColIdx = row.findIndex(c => String(c || "").trim() === "Æò°¡±İ¾×");
+                const yieldColIdx = row.findIndex(c => String(c || "").trim() === "¼öÀÍ·ü");
 
                 for (let rr = r + 1; rr < rows.length; rr++) {
                   const dRow = rows[rr];
                   if (!dRow) continue;
                   const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
-                  if (typeof nameVal === "string" && (nameVal.includes("ì´ê³„") || nameVal.includes("ë³´ìœ ìƒí’ˆê°œìˆ˜"))) break;
+                  if (typeof nameVal === "string" && (nameVal.includes("ÃÑ°è") || nameVal.includes("º¸À¯»óÇ°°³¼ö"))) break;
 
                   const principalVal = principalColIdx !== -1 ? dRow[principalColIdx] : undefined;
                   const appraisedVal = appraisedColIdx !== -1 ? dRow[appraisedColIdx] : undefined;
@@ -1515,25 +1657,25 @@ ${question}`;
                 break;
               }
 
-              // "N.ëŒ€ì¶œí˜„í™©" ìƒì„¸ í‘œ(ìƒí’ˆëª…/ëŒ€ì¶œì”ì•¡/ëŒ€ì¶œê¸ˆë¦¬)ì—ì„œ ì£¼ë‹´ëŒ€ ì”ì•¡Â·ê¸ˆë¦¬ë¥¼ ë” ì •í™•íˆ ë°˜ì˜í•œë‹¤.
+              // "N.´ëÃâÇöÈ²" »ó¼¼ Ç¥(»óÇ°¸í/´ëÃâÀÜ¾×/´ëÃâ±İ¸®)¿¡¼­ ÁÖ´ã´ë ÀÜ¾×¡¤±İ¸®¸¦ ´õ Á¤È®È÷ ¹İ¿µÇÑ´Ù.
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
-                const hasBalanceHeader = row.some(c => String(c || "").trim() === "ëŒ€ì¶œì”ì•¡");
-                const hasRateHeader = row.some(c => String(c || "").trim() === "ëŒ€ì¶œê¸ˆë¦¬");
+                const hasBalanceHeader = row.some(c => String(c || "").trim() === "´ëÃâÀÜ¾×");
+                const hasRateHeader = row.some(c => String(c || "").trim() === "´ëÃâ±İ¸®");
                 if (!hasBalanceHeader || !hasRateHeader) continue;
 
-                const nameColIdx = row.findIndex(c => String(c || "").trim() === "ìƒí’ˆëª…");
-                const balanceColIdx = row.findIndex(c => String(c || "").trim() === "ëŒ€ì¶œì”ì•¡");
-                const rateColIdx = row.findIndex(c => String(c || "").trim() === "ëŒ€ì¶œê¸ˆë¦¬");
+                const nameColIdx = row.findIndex(c => String(c || "").trim() === "»óÇ°¸í");
+                const balanceColIdx = row.findIndex(c => String(c || "").trim() === "´ëÃâÀÜ¾×");
+                const rateColIdx = row.findIndex(c => String(c || "").trim() === "´ëÃâ±İ¸®");
 
                 for (let rr = r + 1; rr < rows.length; rr++) {
                   const dRow = rows[rr];
                   if (!dRow) continue;
                   const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
-                  if (typeof nameVal === "string" && nameVal.includes("ì´ê³„")) break;
+                  if (typeof nameVal === "string" && nameVal.includes("ÃÑ°è")) break;
 
-                  if (typeof nameVal === "string" && (nameVal.includes("ì£¼íƒë‹´ë³´ëŒ€ì¶œ") || nameVal.includes("ì£¼ë‹´ëŒ€"))) {
+                  if (typeof nameVal === "string" && (nameVal.includes("ÁÖÅÃ´ãº¸´ëÃâ") || nameVal.includes("ÁÖ´ã´ë"))) {
                     const balanceVal = balanceColIdx !== -1 ? dRow[balanceColIdx] : undefined;
                     const rateVal = rateColIdx !== -1 ? dRow[rateColIdx] : undefined;
                     if (typeof balanceVal === "number") mortgageAmount = Math.abs(balanceVal);
@@ -1546,12 +1688,7 @@ ${question}`;
               if (assetHeaderRowIdx !== -1) {
                 newInvestments.push(...Array.from(investMap.values()));
 
-                newFree.forEach(f => {
-                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
-                });
-                newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
-                if (mortgageAmount) combinedMortgageAmount = mortgageAmount;
-                if (mortgageRate) combinedMortgageRate = mortgageRate;
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate);
 
                 assetsSuccessCount += (newFree.length + newInvestments.length);
                 parsedStructured = true;
@@ -1572,10 +1709,10 @@ ${question}`;
                   return matchedKey ? row[matchedKey] : undefined;
                 };
 
-                const rawName = findVal(["ìì‚°ëª…", "ê³„ì¢Œëª…", "ì´ë¦„", "name", "asset", "account"]);
-                const rawAmount = findVal(["ê¸ˆì•¡", "ì”ì•¡", "í‰ê°€ì•¡", "amount", "balance", "value"]);
-                const rawType = findVal(["ìœ í˜•", "êµ¬ë¶„", "ì¢…ë¥˜", "type", "category"]);
-                const rawOwner = findVal(["ì†Œìœ ì", "ì†Œìœ ", "ëª…ì˜", "owner"]);
+                const rawName = findVal(["ÀÚ»ê¸í", "°èÁÂ¸í", "ÀÌ¸§", "name", "asset", "account"]);
+                const rawAmount = findVal(["±İ¾×", "ÀÜ¾×", "Æò°¡¾×", "amount", "balance", "value"]);
+                const rawType = findVal(["À¯Çü", "±¸ºĞ", "Á¾·ù", "type", "category"]);
+                const rawOwner = findVal(["¼ÒÀ¯ÀÚ", "¼ÒÀ¯", "¸íÀÇ", "owner"]);
 
                 if (!rawName) return;
 
@@ -1592,22 +1729,22 @@ ${question}`;
                 const nameLower = name.toLowerCase();
 
                 if (
-                  ["í•©ê³„", "ì´ê³„", "ì´ìì‚°", "ìˆœìì‚°", "ì†Œê³„", "ì´ 5ê±´", "ì´5ê±´", "ê±´ìˆ˜"].some(h => nameLower.includes(h)) ||
-                  nameLower.includes("ì£¼íƒë‹´ë³´ëŒ€ì¶œ") || 
-                  nameLower.includes("ì£¼ë‹´ëŒ€") || 
-                  nameLower.includes("nhì£¼íƒë‹´ë³´ëŒ€ì¶œ") || 
-                  nameLower.includes("ëŒ€ì¶œê¸ˆ") || 
-                  nameLower.includes("ëŒ€ì¶œ") || 
-                  nameLower.includes("ë³´í—˜") || 
-                  nameLower.includes("ì‚¼ì„±ìƒëª…") || 
-                  nameLower.includes("ì‚¼ì„±í™”ì¬") || 
-                  nameLower.includes("ë¼ì´í”„") ||
-                  nameLower.includes("ë³´ì¥ì„±") || 
-                  nameLower.includes("ë³´í—˜ê¸ˆ") || 
-                  nameLower.includes("ì´ê³„") || 
-                  nameLower.includes("ì†Œê³„") || 
-                  nameLower.includes("í•©ê³„") || 
-                  nameLower.includes("ë¶€ì±„")
+                  ["ÇÕ°è", "ÃÑ°è", "ÃÑÀÚ»ê", "¼øÀÚ»ê", "¼Ò°è", "ÃÑ 5°Ç", "ÃÑ5°Ç", "°Ç¼ö"].some(h => nameLower.includes(h)) ||
+                  nameLower.includes("ÁÖÅÃ´ãº¸´ëÃâ") || 
+                  nameLower.includes("ÁÖ´ã´ë") || 
+                  nameLower.includes("nhÁÖÅÃ´ãº¸´ëÃâ") || 
+                  nameLower.includes("´ëÃâ±İ") || 
+                  nameLower.includes("´ëÃâ") || 
+                  nameLower.includes("º¸Çè") || 
+                  nameLower.includes("»ï¼º»ı¸í") || 
+                  nameLower.includes("»ï¼ºÈ­Àç") || 
+                  nameLower.includes("¶óÀÌÇÁ") ||
+                  nameLower.includes("º¸Àå¼º") || 
+                  nameLower.includes("º¸Çè±İ") || 
+                  nameLower.includes("ÃÑ°è") || 
+                  nameLower.includes("¼Ò°è") || 
+                  nameLower.includes("ÇÕ°è") || 
+                  nameLower.includes("ºÎÃ¤")
                 ) {
                   return;
                 }
@@ -1615,10 +1752,10 @@ ${question}`;
                 let ownerPrefix = ownerTag;
                 if (rawOwner) {
                   const ownerStr = String(rawOwner);
-                  if (ownerStr.includes("ì˜ë²”")) {
-                    ownerPrefix = "[ì˜ë²”] ";
-                  } else if (ownerStr.includes("ì¬ì€")) {
-                    ownerPrefix = "[ì¬ì€] ";
+                  if (ownerStr.includes("¿µ¹ü")) {
+                    ownerPrefix = "[¿µ¹ü] ";
+                  } else if (ownerStr.includes("ÀçÀº")) {
+                    ownerPrefix = "[ÀçÀº] ";
                   }
                 }
 
@@ -1628,19 +1765,19 @@ ${question}`;
 
                 const typeStr = rawType ? String(rawType).toLowerCase() : "";
 
-                if (typeStr.includes("ì…ì¶œê¸ˆ") || typeStr.includes("ììœ ") || typeStr.includes("í˜„ê¸ˆ") || typeStr.includes("free") || typeStr.includes("cash") || typeStr.includes("ì ê¸ˆ") || typeStr.includes("ì˜ˆê¸ˆ") || typeStr.includes("ì €ì¶•") || typeStr.includes("savings") || typeStr.includes("ì „ì") || typeStr.includes("í˜ì´") || typeStr.includes("ê°„í¸") || typeStr.includes("pay") || typeStr.includes("electronic")) {
-                  const isInvestmentName = ["ì£¼ì‹", "í€ë“œ", "cma", "isa", "ì¦ê¶Œ", "ìœ„íƒ", "tiger", "kodex", "s&p", "sp500", "ì—°ê¸ˆì €ì¶•", "í‡´ì§ì—°ê¸ˆ", "irp", "íˆ¬ì", "ì¢…í•©ìœ„íƒ", "ì¤‘ê°œí˜•"].some(k => nameLower.includes(k));
+                if (typeStr.includes("ÀÔÃâ±İ") || typeStr.includes("ÀÚÀ¯") || typeStr.includes("Çö±İ") || typeStr.includes("free") || typeStr.includes("cash") || typeStr.includes("Àû±İ") || typeStr.includes("¿¹±İ") || typeStr.includes("ÀúÃà") || typeStr.includes("savings") || typeStr.includes("ÀüÀÚ") || typeStr.includes("ÆäÀÌ") || typeStr.includes("°£Æí") || typeStr.includes("pay") || typeStr.includes("electronic")) {
+                  const isInvestmentName = ["ÁÖ½Ä", "Æİµå", "cma", "isa", "Áõ±Ç", "À§Å¹", "tiger", "kodex", "s&p", "sp500", "¿¬±İÀúÃà", "ÅğÁ÷¿¬±İ", "irp", "ÅõÀÚ", "Á¾ÇÕÀ§Å¹", "Áß°³Çü"].some(k => nameLower.includes(k));
                   if (isInvestmentName) {
                     newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
                   } else {
                     newFree.push({ name, amount });
                   }
-                } else if (typeStr.includes("ì£¼ì‹") || typeStr.includes("íˆ¬ì") || typeStr.includes("í€ë“œ") || typeStr.includes("ì¦ê¶Œ") || typeStr.includes("stock") || typeStr.includes("investment")) {
-                  const rawYield = findVal(["ìˆ˜ìµë¥ ", "ìˆ˜ìµ", "yield", "rate"]);
+                } else if (typeStr.includes("ÁÖ½Ä") || typeStr.includes("ÅõÀÚ") || typeStr.includes("Æİµå") || typeStr.includes("Áõ±Ç") || typeStr.includes("stock") || typeStr.includes("investment")) {
+                  const rawYield = findVal(["¼öÀÍ·ü", "¼öÀÍ", "yield", "rate"]);
                   const yieldRate = rawYield !== undefined ? parseFloat(String(rawYield).replace(/[^0-9.-]/g, "")) || 0 : 0;
                   newInvestments.push({ name, principal: amount, appraised: amount, yieldRate });
                 } else {
-                  const isInvestmentName = ["ì£¼ì‹", "í€ë“œ", "cma", "isa", "ì¦ê¶Œ", "ìœ„íƒ", "tiger", "kodex", "s&p", "sp500", "ì—°ê¸ˆì €ì¶•", "í‡´ì§ì—°ê¸ˆ", "irp", "íˆ¬ì", "ì¢…í•©ìœ„íƒ", "ì¤‘ê°œí˜•"].some(k => nameLower.includes(k));
+                  const isInvestmentName = ["ÁÖ½Ä", "Æİµå", "cma", "isa", "Áõ±Ç", "À§Å¹", "tiger", "kodex", "s&p", "sp500", "¿¬±İÀúÃà", "ÅğÁ÷¿¬±İ", "irp", "ÅõÀÚ", "Á¾ÇÕÀ§Å¹", "Áß°³Çü"].some(k => nameLower.includes(k));
                   if (isInvestmentName) {
                     newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
                   } else {
@@ -1650,10 +1787,7 @@ ${question}`;
               });
 
               if (newFree.length > 0 || newInvestments.length > 0) {
-                newFree.forEach(f => {
-                  if (!combinedFree.some(cf => cf.name === f.name)) combinedFree.push(f);
-                });
-                newInvestments.forEach(inv => combinedInvestMap.set(inv.name, inv));
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null);
                 assetsSuccessCount += (newFree.length + newInvestments.length);
                 anySheetParsed = true;
               }
@@ -1662,58 +1796,52 @@ ${question}`;
         }
 
         if (anySheetParsed) {
-          const finalInvestments = Array.from(combinedInvestMap.values());
-          const nextFreeAssets = [...freeAssetsRef.current];
-          combinedFree.forEach(item => {
-            if (!nextFreeAssets.some(existing => existing.name === item.name)) nextFreeAssets.push(item);
+          const nextAssetMonths = Object.keys(parsedAssetSnapshots).sort();
+          const defaultAssetMonth = nextAssetMonths[nextAssetMonths.length - 1];
+          const defaultSnapshot = parsedAssetSnapshots[defaultAssetMonth] || emptyAssetSnapshot();
+          const finalInvestments = defaultSnapshot.investmentAssets || [];
+          const finalFreeAssets = defaultSnapshot.freeAssets || [];
+          setAssetSnapshots(parsedAssetSnapshots);
+          setSelectedAssetMonth(defaultAssetMonth);
+          localStorage.setItem("VIVALDI_SELECTED_ASSET_MONTH", defaultAssetMonth);
+          setFreeAssets(finalFreeAssets);
+          setSavingsAssets(defaultSnapshot.savingsAssets || []);
+          setElectronicAssets(defaultSnapshot.electronicAssets || []);
+          setInvestmentAssets(finalInvestments);
+          if (defaultSnapshot.liability?.amount) LIABILITY_MORTGAGE.amount = defaultSnapshot.liability.amount;
+          if (defaultSnapshot.liability?.rate) LIABILITY_MORTGAGE.rate = defaultSnapshot.liability.rate;
+          setAssetCompareMonths(nextAssetMonths.slice(-3));
+          setAssetsFileName(file.name);
+          syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments).then(ok => {
+            if (!ok) {
+              alert("?? ÀÌ ºê¶ó¿ìÀú¿¡´Â ¹İ¿µµÆÁö¸¸, Supabase ÀúÀå¿¡ ½ÇÆĞÇß½À´Ï´Ù. °³¹ßÀÚ µµ±¸ ÄÜ¼ÖÀ» È®ÀÎÇØ ÁÖ¼¼¿ä.");
+            }
           });
-          freeAssetsRef.current = nextFreeAssets;
-          setFreeAssets(nextFreeAssets);
-          setSavingsAssets([]);
-          setElectronicAssets([]);
-          const nextInvestmentsMap = new Map(investmentAssetsRef.current.map(item => [item.name, item]));
-          finalInvestments.forEach(item => nextInvestmentsMap.set(item.name, item));
-          const nextInvestmentAssets = Array.from(nextInvestmentsMap.values());
-          investmentAssetsRef.current = nextInvestmentAssets;
-          setInvestmentAssets(nextInvestmentAssets);
-          if (combinedMortgageAmount) LIABILITY_MORTGAGE.amount = combinedMortgageAmount;
-          if (combinedMortgageRate) LIABILITY_MORTGAGE.rate = combinedMortgageRate;
-          setAssetsFileName(prev => prev ? `${prev}, ${file.name}` : file.name);
-          const cloudOk = await syncAssetsReplaceToSupabase(nextFreeAssets, nextInvestmentAssets);
-          if (!cloudOk) {
-            setCloudSaveError("í´ë¼ìš°ë“œ ì €ì¥ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.");
-            alert("í´ë¼ìš°ë“œ ì €ì¥ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.");
-          } else {
-            setCloudSaveError("");
-          }
           updateHouseholdSettingsInSupabase({
-            assets_file_name: files.map(f => f.name).join(", "),
-            ...(combinedMortgageAmount ? { mortgage_amount: combinedMortgageAmount } : {}),
-            ...(combinedMortgageRate ? { mortgage_rate: combinedMortgageRate } : {})
+            assets_file_name: file.name,
+            ...(defaultSnapshot.liability?.amount ? { mortgage_amount: defaultSnapshot.liability.amount } : {}),
+            ...(defaultSnapshot.liability?.rate ? { mortgage_rate: defaultSnapshot.liability.rate } : {})
           });
-          alert(`ğŸ¦ ìì‚°/ë¶€ì±„ í˜„í™© ${assetsSuccessCount}ê°œ ê³„ì¢Œê°€ ì„±ê³µì ìœ¼ë¡œ ì—°ë™ë˜ì—ˆìŠµë‹ˆë‹¤!`);
+          alert(`?? ÀÚ»ê/ºÎÃ¤ ÇöÈ² ${assetsSuccessCount}°³ °èÁÂ°¡ ${nextAssetMonths.length}°³ ¿ù snapshotÀ¸·Î ¿¬µ¿µÇ¾ú½À´Ï´Ù!`);
         } else {
-          alert("ì—…ë¡œë“œëœ íŒŒì¼ì—ì„œ ìœ íš¨í•œ ìì‚°/ë¶€ì±„ í˜„í™© ì •ë³´ë¥¼ ì°¾ì§€ ëª»í–ˆìŠµë‹ˆë‹¤.");
+          alert("¾÷·ÎµåµÈ ÆÄÀÏ¿¡¼­ À¯È¿ÇÑ ÀÚ»ê/ºÎÃ¤ ÇöÈ² Á¤º¸¸¦ Ã£Áö ¸øÇß½À´Ï´Ù.");
         }
       } catch (error) {
         console.error(error);
-        alert("ìì‚°/ë¶€ì±„ í˜„í™© íŒŒì‹± ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.");
+        alert("ÀÚ»ê/ºÎÃ¤ ÇöÈ² ÆÄ½Ì Áß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.");
       }
     };
     reader.readAsBinaryString(file);
-    });
   };
 
   // Toggle item active state
   const handleToggleItem = (id: number) => {
-    const scrollY = window.scrollY;
     setLedger(prev => {
       const next = prev.map(item => item.id === id ? { ...item, active: !item.active } : item);
       const toggled = next.find(item => item.id === id);
       if (toggled) upsertLedgerItemToSupabase(toggled);
       return next;
     });
-    requestAnimationFrame(() => window.scrollTo({ top: scrollY }));
   };
 
   // Delete ledger item
@@ -1722,14 +1850,14 @@ ${question}`;
     deleteLedgerItemFromSupabase(id);
   };
 
-  // ì§€ì¶œ ë‚´ì—­ì„ ë‚ ì§œìˆœ(ìˆëŠ” ê·¸ëŒ€ë¡œ) ë˜ëŠ” ì§€ì¶œìë³„ë¡œ ë¬¶ì–´ì„œ ë³´ì—¬ì¤€ë‹¤.
+  // ÁöÃâ ³»¿ªÀ» ³¯Â¥¼ø(ÀÖ´Â ±×´ë·Î) ¶Ç´Â ÁöÃâÀÚº°·Î ¹­¾î¼­ º¸¿©ÁØ´Ù.
   const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
-    if (ledgerSortMode !== "spender") {
+    if (ledgerSortMode === "date") {
       return [{ label: null, items }];
     }
     const groups = new Map<string, LedgerItem[]>();
     items.forEach(item => {
-      const key = (item.spender || "").trim() || "ë¯¸ì§€ì •";
+      const key = (item.spender || "").trim() || "¹ÌÁöÁ¤";
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(item);
     });
@@ -1738,28 +1866,31 @@ ${question}`;
       .map(([label, groupItems]) => ({ label, items: groupItems }));
   };
 
-  const getLedgerItemsForDisplay = (type: "ìˆ˜ì…" | "ì§€ì¶œ") => {
+  const filterLedgerItems = (items: LedgerItem[]) => {
     const query = ledgerSearchQuery.trim().toLowerCase();
-    return ledger
-      .filter(item => (isMultiMonth ? selectedMonths.includes(item.month) : item.month === selectedMonth))
-      .filter(item => item.type === type)
-      .filter(item => {
-        if (ledgerReflectionFilter === "active" && !item.active) return false;
-        if (ledgerReflectionFilter === "inactive" && item.active) return false;
-        if (!query) return true;
-        return [item.category, item.content, item.memo || "", item.spender || "", item.paymentMethod || ""]
-          .join(" ")
-          .toLowerCase()
-          .includes(query);
-      })
-      .sort((a, b) => {
-        if (ledgerSortMode === "amount") return Math.abs(b.amount) - Math.abs(a.amount);
-        if (ledgerSortMode === "spender") return (a.spender || "").localeCompare(b.spender || "");
-        return (b.date || "").localeCompare(a.date || "");
-      });
+    return items.filter((item) => {
+      if (ledgerVisibilityFilter === "active" && !item.active) return false;
+      if (ledgerVisibilityFilter === "inactive" && item.active) return false;
+      if (!query) return true;
+      return [item.content, item.category, item.memo || "", item.spender || ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
   };
 
-  // ì²´í¬ë¦¬ìŠ¤íŠ¸: ì¶”ê°€/í† ê¸€/ìˆ˜ì •/ì‚­ì œ (Supabaseì— ì €ì¥ë˜ì–´ ì¬ì ‘ì†Â·ë‹¤ë¥¸ ê¸°ê¸°ì—ì„œë„ ìœ ì§€ë¨)
+  const sortLedgerItems = (items: LedgerItem[]) => {
+    const next = [...items];
+    if (ledgerSortMode === "amount") {
+      return next.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+    }
+    if (ledgerSortMode === "spender") {
+      return next.sort((a, b) => (a.spender || "").localeCompare(b.spender || ""));
+    }
+    return next.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  };
+
+  // Ã¼Å©¸®½ºÆ®: Ãß°¡/Åä±Û/¼öÁ¤/»èÁ¦ (Supabase¿¡ ÀúÀåµÇ¾î ÀçÁ¢¼Ó¡¤´Ù¸¥ ±â±â¿¡¼­µµ À¯ÁöµÊ)
   const handleAddChecklistItem = (label: string) => {
     const trimmed = label.trim();
     if (!trimmed) return;
@@ -1782,7 +1913,7 @@ ${question}`;
     });
   };
 
-  // ì…ë ¥ ì¤‘ì—ëŠ” ë¡œì»¬ ìƒíƒœë§Œ ê°±ì‹ í•˜ê³ (íƒ€ìë§ˆë‹¤ Supabaseì— ì“°ì§€ ì•Šë„ë¡), blur ì‹œì ì—ë§Œ ì„œë²„ì— ë°˜ì˜í•œë‹¤.
+  // ÀÔ·Â Áß¿¡´Â ·ÎÄÃ »óÅÂ¸¸ °»½ÅÇÏ°í(Å¸ÀÚ¸¶´Ù Supabase¿¡ ¾²Áö ¾Êµµ·Ï), blur ½ÃÁ¡¿¡¸¸ ¼­¹ö¿¡ ¹İ¿µÇÑ´Ù.
   const handleChecklistLabelChange = (id: number, newLabel: string) => {
     setChecklist(prev => prev.map(item => item.id === id ? { ...item, label: newLabel } : item));
   };
@@ -1797,7 +1928,7 @@ ${question}`;
     deleteChecklistItemFromSupabase(id);
   };
 
-  // ëŒ€ì¶œ ìƒí™˜ ê¸°ë¡ ì¶”ê°€/ì‚­ì œ
+  // ´ëÃâ »óÈ¯ ±â·Ï Ãß°¡/»èÁ¦
   const handleAddMortgagePayment = (paymentDate: string, amount: number, memo: string) => {
     if (!paymentDate || amount <= 0) return;
     const newPayment: MortgagePayment = { id: Date.now(), paymentDate, amount, memo };
@@ -1812,7 +1943,7 @@ ${question}`;
 
   // Delete all ledger items
   const handleDeleteLedger = () => {
-    if (window.confirm("ìˆ˜ì…/ì§€ì¶œ ë°ì´í„°ë¥¼ ì™„ì „íˆ ë¹„ìš°ê³  ì´ˆê¸°í™”í•˜ì‹œê² ìŠµë‹ˆê¹Œ? (ê¸°ë³¸ ìƒ˜í”Œë„ ì œê±°ë©ë‹ˆë‹¤)")) {
+    if (window.confirm("¼öÀÔ/ÁöÃâ µ¥ÀÌÅÍ¸¦ ¿ÏÀüÈ÷ ºñ¿ì°í ÃÊ±âÈ­ÇÏ½Ã°Ú½À´Ï±î? (±âº» »ùÇÃµµ Á¦°ÅµË´Ï´Ù)")) {
       setLedger([]);
       setLedgerFileName(null);
       syncLedgerReplaceToSupabase([]);
@@ -1822,11 +1953,15 @@ ${question}`;
 
   // Delete all assets items
   const handleDeleteAssets = () => {
-    if (window.confirm("ìì‚° ë°ì´í„°ë¥¼ ì™„ì „íˆ ë¹„ìš°ê³  ì´ˆê¸°í™”í•˜ì‹œê² ìŠµë‹ˆê¹Œ? (ê¸°ë³¸ ìƒ˜í”Œë„ ì œê±°ë©ë‹ˆë‹¤)")) {
+    if (window.confirm("ÀÚ»ê µ¥ÀÌÅÍ¸¦ ¿ÏÀüÈ÷ ºñ¿ì°í ÃÊ±âÈ­ÇÏ½Ã°Ú½À´Ï±î? (±âº» »ùÇÃµµ Á¦°ÅµË´Ï´Ù)")) {
       setFreeAssets([]);
       setSavingsAssets([]);
       setElectronicAssets([]);
       setInvestmentAssets([]);
+      setAssetSnapshots({});
+      setSelectedAssetMonth("");
+      setAssetCompareMonths([]);
+      localStorage.removeItem("VIVALDI_SELECTED_ASSET_MONTH");
       setAssetsFileName(null);
       syncAssetsReplaceToSupabase([], []);
       updateHouseholdSettingsInSupabase({ assets_file_name: null });
@@ -1835,13 +1970,17 @@ ${question}`;
 
   // Reset all data
   const handleResetAllData = () => {
-    if (window.confirm("ëª¨ë“  ê°€ê³„ ë°ì´í„°ë¥¼ ê¹¨ë—í•˜ê²Œ ì´ˆê¸°í™”í•˜ê³  ì „ì²´ ë¦¬ì…‹í•˜ì‹œê² ìŠµë‹ˆê¹Œ?")) {
+    if (window.confirm("¸ğµç °¡°è µ¥ÀÌÅÍ¸¦ ±ú²ıÇÏ°Ô ÃÊ±âÈ­ÇÏ°í ÀüÃ¼ ¸®¼ÂÇÏ½Ã°Ú½À´Ï±î?")) {
       setLedger([]);
       setLedgerFileName(null);
       setFreeAssets([]);
       setSavingsAssets([]);
       setElectronicAssets([]);
       setInvestmentAssets([]);
+      setAssetSnapshots({});
+      setSelectedAssetMonth("");
+      setAssetCompareMonths([]);
+      localStorage.removeItem("VIVALDI_SELECTED_ASSET_MONTH");
       setAssetsFileName(null);
       setMortgagePayments([]);
       LIABILITY_MORTGAGE.amount = 600000000;
@@ -1863,24 +2002,24 @@ ${question}`;
   if (authGateEnabled && (authLoading || cloudDataLoading)) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center">
-        <div className="text-slate-400 text-sm font-bold animate-pulse">ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘...</div>
+        <div className="text-slate-400 text-sm font-bold animate-pulse">ºÒ·¯¿À´Â Áß...</div>
       </div>
     );
   }
 
-  // ì´ë©”ì¼ì˜ ì¬ì„¤ì • ë§í¬ë¥¼ í´ë¦­í•´ì„œ ëŒì•„ì˜¨ ê²½ìš°: ì„¸ì…˜ì´ ìˆì–´ë„(ì„ì‹œ ë³µêµ¬ ì„¸ì…˜) ìƒˆ ë¹„ë°€ë²ˆí˜¸ ì„¤ì • í™”ë©´ì„ ë¨¼ì € ë³´ì—¬ì¤€ë‹¤.
+  // ÀÌ¸ŞÀÏÀÇ Àç¼³Á¤ ¸µÅ©¸¦ Å¬¸¯ÇØ¼­ µ¹¾Æ¿Â °æ¿ì: ¼¼¼ÇÀÌ ÀÖ¾îµµ(ÀÓ½Ã º¹±¸ ¼¼¼Ç) »õ ºñ¹Ğ¹øÈ£ ¼³Á¤ È­¸éÀ» ¸ÕÀú º¸¿©ÁØ´Ù.
   if (authGateEnabled && authView === "reset") {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="reset_password_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
           <div className="text-center space-y-1">
-            <div className="text-3xl">ğŸ”‘</div>
-            <h1 className="text-lg font-bold text-slate-900">ìƒˆ ë¹„ë°€ë²ˆí˜¸ ì„¤ì •</h1>
-            <p className="text-xs text-slate-400">ìƒˆë¡œ ì‚¬ìš©í•  ë¹„ë°€ë²ˆí˜¸ë¥¼ ì…ë ¥í•´ ì£¼ì„¸ìš”</p>
+            <div className="text-3xl">??</div>
+            <h1 className="text-lg font-bold text-slate-900">»õ ºñ¹Ğ¹øÈ£ ¼³Á¤</h1>
+            <p className="text-xs text-slate-400">»õ·Î »ç¿ëÇÒ ºñ¹Ğ¹øÈ£¸¦ ÀÔ·ÂÇØ ÁÖ¼¼¿ä</p>
           </div>
           <form onSubmit={handleResetPassword} className="space-y-3" id="reset_password_form">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-600 block">ìƒˆ ë¹„ë°€ë²ˆí˜¸</label>
+              <label className="text-xs font-bold text-slate-600 block">»õ ºñ¹Ğ¹øÈ£</label>
               <input
                 type="password"
                 value={newPassword}
@@ -1891,7 +2030,7 @@ ${question}`;
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-600 block">ìƒˆ ë¹„ë°€ë²ˆí˜¸ í™•ì¸</label>
+              <label className="text-xs font-bold text-slate-600 block">»õ ºñ¹Ğ¹øÈ£ È®ÀÎ</label>
               <input
                 type="password"
                 value={newPasswordConfirm}
@@ -1908,7 +2047,7 @@ ${question}`;
               disabled={resetSubmitting}
               className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
             >
-              {resetSubmitting ? "ì €ì¥ ì¤‘..." : "ë¹„ë°€ë²ˆí˜¸ ë³€ê²½"}
+              {resetSubmitting ? "ÀúÀå Áß..." : "ºñ¹Ğ¹øÈ£ º¯°æ"}
             </button>
             {resetMessage && (
               <button
@@ -1916,7 +2055,7 @@ ${question}`;
                 onClick={async () => { await handleLogout(); setAuthView("login"); }}
                 className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
               >
-                ë¡œê·¸ì¸ í™”ë©´ìœ¼ë¡œ ì´ë™
+                ·Î±×ÀÎ È­¸éÀ¸·Î ÀÌµ¿
               </button>
             )}
           </form>
@@ -1930,17 +2069,17 @@ ${question}`;
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
           <div className="text-center space-y-1">
-            <div className="text-3xl">ğŸ¡</div>
-            <h1 className="text-lg font-bold text-slate-900">ì—°ì¤€ì´ë„¤ ê°€ê³„ë¶€</h1>
+            <div className="text-3xl">??</div>
+            <h1 className="text-lg font-bold text-slate-900">¿¬ÁØÀÌ³× °¡°èºÎ</h1>
             <p className="text-xs text-slate-400">
-              {authView === "forgot" ? "ê°€ì…í•œ ì´ë©”ì¼ë¡œ ì¬ì„¤ì • ë§í¬ë¥¼ ë°›ìœ¼ì„¸ìš”" : "ë¶€ë¶€ê°€ ê³µìœ í•˜ëŠ” ê³„ì •ìœ¼ë¡œ ë¡œê·¸ì¸í•˜ì„¸ìš”"}
+              {authView === "forgot" ? "°¡ÀÔÇÑ ÀÌ¸ŞÀÏ·Î Àç¼³Á¤ ¸µÅ©¸¦ ¹ŞÀ¸¼¼¿ä" : "ºÎºÎ°¡ °øÀ¯ÇÏ´Â °èÁ¤À¸·Î ·Î±×ÀÎÇÏ¼¼¿ä"}
             </p>
           </div>
 
           {authView === "login" ? (
             <form onSubmit={handleLogin} className="space-y-3" id="login_form">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-600 block">ì´ë©”ì¼</label>
+                <label className="text-xs font-bold text-slate-600 block">ÀÌ¸ŞÀÏ</label>
                 <input
                   type="email"
                   value={loginEmail}
@@ -1951,7 +2090,7 @@ ${question}`;
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-600 block">ë¹„ë°€ë²ˆí˜¸</label>
+                <label className="text-xs font-bold text-slate-600 block">ºñ¹Ğ¹øÈ£</label>
                 <input
                   type="password"
                   value={loginPassword}
@@ -1967,7 +2106,7 @@ ${question}`;
                 disabled={loginSubmitting}
                 className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
               >
-                {loginSubmitting ? "ë¡œê·¸ì¸ ì¤‘..." : "ë¡œê·¸ì¸"}
+                {loginSubmitting ? "·Î±×ÀÎ Áß..." : "·Î±×ÀÎ"}
               </button>
               <button
                 type="button"
@@ -1980,13 +2119,13 @@ ${question}`;
                 className="w-full text-center text-xs text-slate-400 hover:text-emerald-600 font-semibold cursor-pointer"
                 id="forgot_password_link"
               >
-                ë¹„ë°€ë²ˆí˜¸ë¥¼ ìŠìœ¼ì…¨ë‚˜ìš”?
+                ºñ¹Ğ¹øÈ£¸¦ ÀØÀ¸¼Ì³ª¿ä?
               </button>
             </form>
           ) : (
             <form onSubmit={handleForgotPassword} className="space-y-3" id="forgot_password_form">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-600 block">ì´ë©”ì¼</label>
+                <label className="text-xs font-bold text-slate-600 block">ÀÌ¸ŞÀÏ</label>
                 <input
                   type="email"
                   value={forgotEmail}
@@ -2003,14 +2142,14 @@ ${question}`;
                 disabled={forgotSubmitting}
                 className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 text-white font-bold text-sm py-2.5 rounded-xl transition-all cursor-pointer"
               >
-                {forgotSubmitting ? "ì „ì†¡ ì¤‘..." : "ì¬ì„¤ì • ë§í¬ ë°›ê¸°"}
+                {forgotSubmitting ? "Àü¼Û Áß..." : "Àç¼³Á¤ ¸µÅ© ¹Ş±â"}
               </button>
               <button
                 type="button"
                 onClick={() => { setAuthView("login"); setLoginError(""); }}
                 className="w-full text-center text-xs text-slate-400 hover:text-emerald-600 font-semibold cursor-pointer"
               >
-                â† ë¡œê·¸ì¸ í™”ë©´ìœ¼ë¡œ ëŒì•„ê°€ê¸°
+                ¡ç ·Î±×ÀÎ È­¸éÀ¸·Î µ¹¾Æ°¡±â
               </button>
             </form>
           )}
@@ -2031,8 +2170,8 @@ ${question}`;
             <Home className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight">ğŸ¡ ì—°ì¤€ì´ë„¤ ê°€ê³„ë¶€</h1>
-            <p className="text-xs text-slate-400">ìš°ë¦¬ì§‘ í†µí•© ì¬ì • ëŒ€ì‹œë³´ë“œ</p>
+            <h1 className="text-lg font-bold tracking-tight">?? ¿¬ÁØÀÌ³× °¡°èºÎ</h1>
+            <p className="text-xs text-slate-400">¿ì¸®Áı ÅëÇÕ ÀçÁ¤ ´ë½Ãº¸µå</p>
           </div>
         </div>
 
@@ -2040,7 +2179,7 @@ ${question}`;
         <div className="p-5 border-b border-slate-800 bg-slate-950/20 space-y-4" id="sidebar_excel_uploader">
           <div>
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2 flex items-center gap-1">
-              <span>ğŸ’¸</span> ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ ì—…ë¡œë“œ
+              <span>??</span> ¼öÀÔ/ÁöÃâ ³»¿ª ¾÷·Îµå
             </span>
             <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 bg-slate-900/60 hover:bg-slate-800/40 transition-all text-center cursor-pointer relative group">
               <input 
@@ -2048,14 +2187,14 @@ ${question}`;
                 accept=".xlsx, .xls"
                 onChange={handleLedgerExcelUpload}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                title="ìˆ˜ì…/ì§€ì¶œ ì—‘ì…€ íŒŒì¼ ì—…ë¡œë“œ"
+                title="¼öÀÔ/ÁöÃâ ¿¢¼¿ ÆÄÀÏ ¾÷·Îµå"
               />
               <div className="space-y-1 pointer-events-none">
                 <div className="mx-auto w-6 h-6 bg-emerald-500/10 border border-emerald-500/20 rounded-full flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
                   <Upload className="w-3.5 h-3.5" />
                 </div>
                 <div className="text-[11px] font-bold text-slate-200">
-                  ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ ì„ íƒ
+                  ¼öÀÔ/ÁöÃâ ³»¿ª ¼±ÅÃ
                 </div>
               </div>
             </label>
@@ -2063,23 +2202,22 @@ ${question}`;
 
           <div>
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2 flex items-center gap-1">
-              <span>ğŸ¦</span> ìì‚°/ë¶€ì±„ í˜„í™© ì—…ë¡œë“œ
+              <span>??</span> ÀÚ»ê/ºÎÃ¤ ÇöÈ² ¾÷·Îµå
             </span>
             <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 bg-slate-900/60 hover:bg-slate-800/40 transition-all text-center cursor-pointer relative group">
               <input 
                 type="file" 
                 accept=".xlsx, .xls"
-                multiple
                 onChange={handleAssetsExcelUpload}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                title="ìì‚°/ë¶€ì±„ ì—‘ì…€ íŒŒì¼ ì—…ë¡œë“œ"
+                title="ÀÚ»ê/ºÎÃ¤ ¿¢¼¿ ÆÄÀÏ ¾÷·Îµå"
               />
               <div className="space-y-1 pointer-events-none">
                 <div className="mx-auto w-6 h-6 bg-emerald-500/10 border border-emerald-500/20 rounded-full flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
                   <Upload className="w-3.5 h-3.5" />
                 </div>
                 <div className="text-[11px] font-bold text-slate-200">
-                  ìì‚°/ë¶€ì±„ í˜„í™© ì„ íƒ
+                  ÀÚ»ê/ºÎÃ¤ ÇöÈ² ¼±ÅÃ
                 </div>
               </div>
             </label>
@@ -2088,88 +2226,83 @@ ${question}`;
 
         {/* Sidebar Upload Status Summary & Management */}
         <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/40">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">ğŸ“Š ë°ì´í„° ì—…ë¡œë“œ ìƒíƒœ</span>
+          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">?? µ¥ÀÌÅÍ ¾÷·Îµå »óÅÂ</span>
           <div className="space-y-2 text-xs">
             <div className="flex flex-col bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
-              <span className="text-[10px] text-slate-400">ğŸ’¸ ìˆ˜ì…/ì§€ì¶œ ë°ì´í„°</span>
+              <span className="text-[10px] text-slate-400">?? ¼öÀÔ/ÁöÃâ µ¥ÀÌÅÍ</span>
               <span className="font-semibold text-slate-200 truncate mt-0.5">
-                {ledgerFileName ? `âœ… ${ledgerFileName}` : "âš ï¸ ê¸°ë³¸ ìƒ˜í”Œ ë°ì´í„° ì‚¬ìš© ì¤‘"}
+                {ledgerFileName ? `? ${ledgerFileName}` : "?? ±âº» »ùÇÃ µ¥ÀÌÅÍ »ç¿ë Áß"}
               </span>
-              <span className="text-[9px] text-emerald-400 font-bold mt-0.5">({ledger.length}ê±´ ë¡œë“œë¨)</span>
+              <span className="text-[9px] text-emerald-400 font-bold mt-0.5">({ledger.length}°Ç ·ÎµåµÊ)</span>
             </div>
 
             <div className="flex flex-col bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
-              <span className="text-[10px] text-slate-400">ğŸ¦ ìì‚°/ë¶€ì±„ ë°ì´í„°</span>
+              <span className="text-[10px] text-slate-400">?? ÀÚ»ê/ºÎÃ¤ µ¥ÀÌÅÍ</span>
               <span className="font-semibold text-slate-200 truncate mt-0.5">
-                {assetsFileName ? `âœ… ${assetsFileName}` : "âš ï¸ ê¸°ë³¸ ìƒ˜í”Œ ë°ì´í„° ì‚¬ìš© ì¤‘"}
+                {assetsFileName ? `? ${assetsFileName}` : "?? ±âº» »ùÇÃ µ¥ÀÌÅÍ »ç¿ë Áß"}
               </span>
             </div>
           </div>
-          {cloudSaveError && (
-            <div className="text-[11px] font-bold text-rose-200 bg-rose-950/60 border border-rose-800 rounded-lg px-3 py-2">
-              {cloudSaveError}
-            </div>
-          )}
 
           <div className="grid grid-cols-2 gap-2 mt-2">
             <button
               onClick={handleDeleteLedger}
               className="py-1.5 px-2 bg-slate-800 hover:bg-rose-950 border border-slate-700 hover:border-rose-800 text-slate-300 hover:text-rose-200 rounded-lg text-[10px] font-semibold transition-all flex items-center justify-center gap-1"
-              title="ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ì„ ì™„ì „íˆ ë¹„ì›ë‹ˆë‹¤."
+              title="¼öÀÔ/ÁöÃâ ³»¿ªÀ» ¿ÏÀüÈ÷ ºñ¿ó´Ï´Ù."
             >
               <Trash2 className="w-3 h-3 text-rose-400" />
-              <span>ìˆ˜ì…/ì§€ì¶œ ì‚­ì œ</span>
+              <span>¼öÀÔ/ÁöÃâ »èÁ¦</span>
             </button>
             <button
               onClick={handleDeleteAssets}
               className="py-1.5 px-2 bg-slate-800 hover:bg-rose-950 border border-slate-700 hover:border-rose-800 text-slate-300 hover:text-rose-200 rounded-lg text-[10px] font-semibold transition-all flex items-center justify-center gap-1"
-              title="ìì‚° ëª©ë¡ì„ ì™„ì „íˆ ë¹„ì›ë‹ˆë‹¤."
+              title="ÀÚ»ê ¸ñ·ÏÀ» ¿ÏÀüÈ÷ ºñ¿ó´Ï´Ù."
             >
               <Trash2 className="w-3 h-3 text-rose-400" />
-              <span>ìì‚° ì‚­ì œ</span>
+              <span>ÀÚ»ê »èÁ¦</span>
             </button>
           </div>
           <button
             onClick={handleResetAllData}
             className="w-full py-2 bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
-            title="ëª¨ë“  ë°ì´í„°ë¥¼ ì§€ìš°ê³  ë””í´íŠ¸ ê³ ì •ê°’ ìƒíƒœë¡œ ì´ˆê¸°í™”í•©ë‹ˆë‹¤."
+            title="¸ğµç µ¥ÀÌÅÍ¸¦ Áö¿ì°í µğÆúÆ® °íÁ¤°ª »óÅÂ·Î ÃÊ±âÈ­ÇÕ´Ï´Ù."
           >
-            ğŸ”„ ì „ì²´ ë°ì´í„° ì´ˆê¸°í™”
+            ?? ÀüÃ¼ µ¥ÀÌÅÍ ÃÊ±âÈ­
           </button>
           <button
             onClick={() => window.print()}
             className="w-full py-2 bg-indigo-950 hover:bg-indigo-900 border border-indigo-800 text-indigo-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
-            title="í˜„ì¬ í™”ë©´ì„ PDFë¡œ ì €ì¥í•˜ê±°ë‚˜ ì¸ì‡„í•©ë‹ˆë‹¤."
+            title="ÇöÀç È­¸éÀ» PDF·Î ÀúÀåÇÏ°Å³ª ÀÎ¼âÇÕ´Ï´Ù."
           >
-            ğŸ–¨ï¸ ëŒ€ì‹œë³´ë“œ ë³´ê³ ì„œ PDF ì¶œë ¥ / ì¸ì‡„
+            ??? ´ë½Ãº¸µå º¸°í¼­ PDF Ãâ·Â / ÀÎ¼â
           </button>
           {isSupabaseConfigured && session && (
             <button
               onClick={handleLogout}
               className="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
-              title="ë¡œê·¸ì•„ì›ƒí•©ë‹ˆë‹¤."
+              title="·Î±×¾Æ¿ôÇÕ´Ï´Ù."
               id="logout_button"
             >
-              ğŸšª ë¡œê·¸ì•„ì›ƒ ({session.user.email})
+              ?? ·Î±×¾Æ¿ô ({session.user.email})
             </button>
           )}
         </div>
 
-        <div className="hidden" id="sidebar_supabase_sync_status">
+        <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/30" id="sidebar_supabase_sync_status">
           <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Supabase DB Sync</span>
           <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/50 space-y-2 text-xs">
             <div className="flex justify-between gap-3">
-              <span className="text-slate-400">ì—°ë™ ìƒíƒœ</span>
+              <span className="text-slate-400">¿¬µ¿ »óÅÂ</span>
               <span className={`font-bold ${syncStatus.connected ? "text-emerald-400" : "text-rose-300"}`}>{syncStatus.statusText}</span>
             </div>
             <div className="flex justify-between gap-3">
-              <span className="text-slate-400">ìµœì¢… ë™ê¸°í™”</span>
+              <span className="text-slate-400">ÃÖÁ¾ µ¿±âÈ­</span>
               <span className="font-mono text-slate-200 text-right">{syncStatus.loadedAt}</span>
             </div>
             <div className="grid grid-cols-1 gap-1 pt-2 border-t border-slate-700/60">
-              <div className="flex justify-between"><span className="text-slate-400">income_expenses</span><strong>{syncStatus.incomeExpensesCount.toLocaleString()}ê±´</strong></div>
-              <div className="flex justify-between"><span className="text-slate-400">assets_youngbeom</span><strong>{syncStatus.youngbeomCount.toLocaleString()}ê±´</strong></div>
-              <div className="flex justify-between"><span className="text-slate-400">assets_jaeeun</span><strong>{syncStatus.jaeeunCount.toLocaleString()}ê±´</strong></div>
+              <div className="flex justify-between"><span className="text-slate-400">income_expenses</span><strong>{syncStatus.incomeExpensesCount.toLocaleString()}°Ç</strong></div>
+              <div className="flex justify-between"><span className="text-slate-400">assets_youngbeom</span><strong>{syncStatus.youngbeomCount.toLocaleString()}°Ç</strong></div>
+              <div className="flex justify-between"><span className="text-slate-400">assets_jaeeun</span><strong>{syncStatus.jaeeunCount.toLocaleString()}°Ç</strong></div>
             </div>
           </div>
         </div>
@@ -2181,20 +2314,20 @@ ${question}`;
             <div className="bg-slate-800/40 p-3 rounded-xl border border-slate-700/50 space-y-2">
               <div className="flex items-center space-x-2 text-xs text-slate-300">
                 <User className="w-3.5 h-3.5 text-emerald-400" />
-                <span>ìµœì˜ë²” (ë‚¨í¸)</span>
+                <span>ÃÖ¿µ¹ü (³²Æí)</span>
               </div>
               <div className="flex items-center space-x-2 text-xs text-slate-300">
                 <User className="w-3.5 h-3.5 text-pink-400" />
-                <span>ê°•ì¬ì€ (ì•„ë‚´)</span>
+                <span>°­ÀçÀº (¾Æ³»)</span>
               </div>
             </div>
           </div>
           
           <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-3.5 text-[11px] text-slate-400 leading-relaxed">
             <p className="font-semibold text-slate-300 mb-1 flex items-center gap-1">
-              <span>ğŸ’¡</span> ë¦¬ì•¡í‹°ë¸Œ í†µí•© í”¼ë“œë°±
+              <span>??</span> ¸®¾×Æ¼ºê ÅëÇÕ ÇÇµå¹é
             </p>
-            ì§€ì¶œ/ìˆ˜ì… íƒ­ì—ì„œ í•­ëª©ì„ í™œì„±í™”Â·ë¹„í™œì„±í™”í•˜ê±°ë‚˜ ì‹œë®¬ë ˆì´í„°ë¥¼ ì¡°ì ˆí•˜ë©´ ëª¨ë“  ìì‚° ê³„ì‚°ê³¼ ì§€ì¶œ íŠ¸ë Œë“œê°€ ì‹¤ì‹œê°„ ì—…ë°ì´íŠ¸ë©ë‹ˆë‹¤.
+            ÁöÃâ/¼öÀÔ ÅÇ¿¡¼­ Ç×¸ñÀ» È°¼ºÈ­¡¤ºñÈ°¼ºÈ­ÇÏ°Å³ª ½Ã¹Ä·¹ÀÌÅÍ¸¦ Á¶ÀıÇÏ¸é ¸ğµç ÀÚ»ê °è»ê°ú ÁöÃâ Æ®·»µå°¡ ½Ç½Ã°£ ¾÷µ¥ÀÌÆ®µË´Ï´Ù.
           </div>
         </div>
 
@@ -2210,7 +2343,7 @@ ${question}`;
             id="nav_btn_overview"
           >
             <Home className="w-4 h-4 text-emerald-400" />
-            <span>ğŸ  ì´ê´„ ëŒ€ì‹œë³´ë“œ</span>
+            <span>?? ÃÑ°ı ´ë½Ãº¸µå</span>
           </button>
 
           <button
@@ -2223,7 +2356,7 @@ ${question}`;
             id="nav_btn_ledger"
           >
             <DollarSign className="w-4 h-4 text-emerald-400" />
-            <span>ğŸ’¸ ì§€ì¶œê³¼ ìˆ˜ì…</span>
+            <span>?? ÁöÃâ°ú ¼öÀÔ</span>
           </button>
 
           <button
@@ -2236,7 +2369,7 @@ ${question}`;
             id="nav_btn_analysis"
           >
             <PieChart className="w-4 h-4 text-emerald-400" />
-            <span>ğŸ“Š ì¬ë¬´ì  ì§€ì¶œ ë¶„ì„</span>
+            <span>?? Àç¹«Àû ÁöÃâ ºĞ¼®</span>
           </button>
 
           <button
@@ -2249,7 +2382,7 @@ ${question}`;
             id="nav_btn_assets"
           >
             <TrendingUp className="w-4 h-4 text-emerald-400" />
-            <span>ğŸ“ˆ ìì‚° ë° ë¶€ì±„</span>
+            <span>?? ÀÚ»ê ¹× ºÎÃ¤</span>
           </button>
 
           <button
@@ -2262,7 +2395,7 @@ ${question}`;
             id="nav_btn_report"
           >
             <BarChart2 className="w-4 h-4 text-emerald-400" />
-            <span>ğŸ§© ê°€ê³„ë¶€ ë° ì•± ê°œì„  ë¦¬í¬íŠ¸</span>
+            <span>?? °¡°èºÎ ¹× ¾Û °³¼± ¸®Æ÷Æ®</span>
           </button>
         </nav>
 
@@ -2272,9 +2405,9 @@ ${question}`;
           <button 
             onClick={handleResetAllData}
             className="text-[10px] bg-slate-800 hover:bg-emerald-950 hover:text-emerald-300 text-slate-400 px-2.5 py-1 rounded transition-all border border-slate-700/50"
-            title="ëª¨ë“  ê°€ê³„ ë°ì´í„°ë¥¼ ê¹¨ë—í•˜ê²Œ ì´ˆê¸°í™”í•˜ê³  ì´ˆê¸° ìƒíƒœë¡œ ë¦¬ì…‹í•©ë‹ˆë‹¤."
+            title="¸ğµç °¡°è µ¥ÀÌÅÍ¸¦ ±ú²ıÇÏ°Ô ÃÊ±âÈ­ÇÏ°í ÃÊ±â »óÅÂ·Î ¸®¼ÂÇÕ´Ï´Ù."
           >
-            ì „ì²´ ë°ì´í„° ì´ˆê¸°í™”
+            ÀüÃ¼ µ¥ÀÌÅÍ ÃÊ±âÈ­
           </button>
         </div>
       </aside>
@@ -2291,11 +2424,11 @@ ${question}`;
               <span>Financial Portal</span>
             </div>
             <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-              {activeTab === "overview" && "ğŸ  ì´ê´„ ëŒ€ì‹œë³´ë“œ"}
-              {activeTab === "ledger" && "ğŸ’¸ ì§€ì¶œê³¼ ìˆ˜ì… (Interactive Ledger)"}
-              {activeTab === "analysis" && "ğŸ“Š ì¬ë¬´ì  ì§€ì¶œ ë¶„ì„ (Financial Expense Analysis)"}
-              {activeTab === "assets" && "ğŸ“ˆ ìì‚° ë° ë¶€ì±„ (Asset & Trend Analysis)"}
-              {activeTab === "report" && "ğŸ§© ê°€ê³„ë¶€ ë° ì•± ê°œì„  ë¦¬í¬íŠ¸"}
+              {activeTab === "overview" && "?? ÃÑ°ı ´ë½Ãº¸µå"}
+              {activeTab === "ledger" && "?? ÁöÃâ°ú ¼öÀÔ (Interactive Ledger)"}
+              {activeTab === "analysis" && "?? Àç¹«Àû ÁöÃâ ºĞ¼® (Financial Expense Analysis)"}
+              {activeTab === "assets" && "?? ÀÚ»ê ¹× ºÎÃ¤ (Asset & Trend Analysis)"}
+              {activeTab === "report" && "?? °¡°èºÎ ¹× ¾Û °³¼± ¸®Æ÷Æ®"}
             </h2>
           </div>
         </header>
@@ -2304,7 +2437,7 @@ ${question}`;
         <div className="p-8 flex-1 overflow-y-auto space-y-8" id="tab_contents">
           
           {/* ==========================================
-              TAB 1: ğŸ  ì´ê´„ ëŒ€ì‹œë³´ë“œ (Overview)
+              TAB 1: ?? ÃÑ°ı ´ë½Ãº¸µå (Overview)
              ========================================== */}
           {activeTab === "overview" && (
             <div className="space-y-8" id="overview_tab">
@@ -2312,51 +2445,51 @@ ${question}`;
               {/* Premium AI Wealth Report Panel */}
               {renderAiReport()}
               
-              {/* ğŸ“Š [ì´ë‹¬ì˜ ì¬ë¬´ ë¸Œë¦¬í•‘] ì‹ ê·œ ì„¸ì…˜ ì¶”ê°€ */}
+              {/* ?? [ÀÌ´ŞÀÇ Àç¹« ºê¸®ÇÎ] ½Å±Ô ¼¼¼Ç Ãß°¡ */}
               {(() => {
                 const briefing = calculateMonthlyBriefing(selectedMonth);
                 return (
                   <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6" id="monthly_financial_briefing_card">
                     <div>
                       <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">ğŸ“Š</span>
-                        <span>[ì´ë‹¬ì˜ ì¬ë¬´ ë¸Œë¦¬í•‘] - {selectedMonth.replace("-", "ë…„ ")}ì›” ì§€ì¶œ ë¶„ì„ ë° ì§„ë‹¨</span>
+                        <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">??</span>
+                        <span>[ÀÌ´ŞÀÇ Àç¹« ºê¸®ÇÎ] - {selectedMonth.replace("-", "³â ")}¿ù ÁöÃâ ºĞ¼® ¹× Áø´Ü</span>
                       </h3>
                       <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                        ìš°ë¦¬ ê°€ê³„ì˜ ì‹¤ì‹œê°„ ìì‚° íë¦„ê³¼ ë‹¹ì›” ì§€ì¶œ êµ¬ì¡°ë¥¼ ì¢…í•© ë¶„ì„í•œ AI ìŠ¤ë§ˆíŠ¸ ìš”ì•½ ë¦¬í¬íŠ¸ì…ë‹ˆë‹¤.
+                        ¿ì¸® °¡°èÀÇ ½Ç½Ã°£ ÀÚ»ê Èå¸§°ú ´ç¿ù ÁöÃâ ±¸Á¶¸¦ Á¾ÇÕ ºĞ¼®ÇÑ AI ½º¸¶Æ® ¿ä¾à ¸®Æ÷Æ®ÀÔ´Ï´Ù.
                       </p>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div className="bg-rose-50/30 rounded-2xl border border-rose-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-2">ğŸ”¥ {selectedMonth.replace("-", "ë…„ ")}ì›” ì´ ì§€ì¶œì•¡</span>
+                        <span className="text-xs font-bold text-slate-500 mb-2">?? {selectedMonth.replace("-", "³â ")}¿ù ÃÑ ÁöÃâ¾×</span>
                         <strong className="text-2xl font-mono text-rose-600 font-black">
-                          {briefing.totalExpense.toLocaleString()} ì›
+                          {briefing.totalExpense.toLocaleString()} ¿ø
                         </strong>
                       </div>
                       <div className="bg-blue-50/30 rounded-2xl border border-blue-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">ğŸ”’ ê³ ì •ë¹„ ë¹„ì¤‘</span>
+                        <span className="text-xs font-bold text-slate-500 mb-1">?? °íÁ¤ºñ ºñÁß</span>
                         <strong className="text-2xl font-mono text-blue-700 font-black">
                           {briefing.fixedRatio.toFixed(1)}%
                         </strong>
                         <span className="text-[11px] text-slate-400 mt-1 font-semibold">
-                          ({briefing.fixedSum.toLocaleString()} ì›)
+                          ({briefing.fixedSum.toLocaleString()} ¿ø)
                         </span>
                       </div>
                       <div className="bg-amber-50/30 rounded-2xl border border-amber-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">ğŸ’¸ ë³€ë™ë¹„ ë¹„ì¤‘</span>
+                        <span className="text-xs font-bold text-slate-500 mb-1">?? º¯µ¿ºñ ºñÁß</span>
                         <strong className="text-2xl font-mono text-amber-700 font-black">
                           {briefing.variableRatio.toFixed(1)}%
                         </strong>
                         <span className="text-[11px] text-slate-400 mt-1 font-semibold">
-                          ({briefing.variableSum.toLocaleString()} ì›)
+                          ({briefing.variableSum.toLocaleString()} ¿ø)
                         </span>
                       </div>
                     </div>
 
                     <div className="bg-blue-50/40 border-l-4 border-blue-500 p-4 rounded-r-2xl shadow-xs">
                       <span className="font-bold text-blue-800 text-sm flex items-center gap-1.5">
-                        ğŸ’¡ ì‹¤ì‹œê°„ ì¬ì • ë¶„ì„ ë¦¬í¬íŠ¸ (Financial Insights)
+                        ?? ½Ç½Ã°£ ÀçÁ¤ ºĞ¼® ¸®Æ÷Æ® (Financial Insights)
                       </span>
                       <p className="text-slate-700 text-xs sm:text-sm leading-relaxed mt-2 font-medium">
                         {briefing.summaryText.replace(/\*\*/g, "")}
@@ -2366,22 +2499,22 @@ ${question}`;
                 );
               })()}
               
-              {/* ì›”ë³„ ì§€ì¶œ í˜„í™© ë° ìˆ˜ì… ì¢…í•© ë¶„ì„ íŒ¨ë„ (1ë²ˆ ì‚¬ì§„ ëŒ€ì²´) */}
+              {/* ¿ùº° ÁöÃâ ÇöÈ² ¹× ¼öÀÔ Á¾ÇÕ ºĞ¼® ÆĞ³Î (1¹ø »çÁø ´ëÃ¼) */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6" id="monthly_income_expense_summary_dashboard">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-100 pb-5 gap-4">
                   <div>
                     <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                      <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">ğŸ“Š</span>
-                      <span>ì›”ë³„ ê°€ê³„ ìˆ˜ì… ë° ì§€ì¶œ ì¢…í•© í˜„í™©</span>
+                      <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">??</span>
+                      <span>¿ùº° °¡°è ¼öÀÔ ¹× ÁöÃâ Á¾ÇÕ ÇöÈ²</span>
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                      ê° ì›”ë³„ë¡œ í™œì„±í™”ë˜ì–´ ê°€ê³„ì— ë°˜ì˜ëœ ì‹¤ì§ˆ ìˆ˜ì…ê³¼ ì§€ì¶œ í•­ëª©ì„ ë¶„ë¥˜í•˜ì—¬ í•œëˆˆì— íŒŒì•…í•©ë‹ˆë‹¤.
+                      °¢ ¿ùº°·Î È°¼ºÈ­µÇ¾î °¡°è¿¡ ¹İ¿µµÈ ½ÇÁú ¼öÀÔ°ú ÁöÃâ Ç×¸ñÀ» ºĞ·ùÇÏ¿© ÇÑ´«¿¡ ÆÄ¾ÇÇÕ´Ï´Ù.
                     </p>
                   </div>
 
                   {/* Month Selection directly integrated */}
                   <div className="flex items-center space-x-2 shrink-0">
-                    <span className="text-xs font-bold text-slate-600">ê¸°ì¤€ ì›”:</span>
+                    <span className="text-xs font-bold text-slate-600">±âÁØ ¿ù:</span>
                     <select
                       value={selectedMonth}
                       onChange={(e) => setSelectedMonth(e.target.value)}
@@ -2389,7 +2522,7 @@ ${question}`;
                       id="dashboard_month_select"
                     >
                       {uniqueMonths.map((m) => (
-                        <option key={m} value={m}>{m.replace("-", "ë…„ ")}ì›”</option>
+                        <option key={m} value={m}>{m.replace("-", "³â ")}¿ù</option>
                       ))}
                     </select>
                   </div>
@@ -2402,25 +2535,25 @@ ${question}`;
                     <div className="flex justify-between items-center border-b border-emerald-100/30 pb-2">
                       <h4 className="text-sm font-bold text-emerald-800 flex items-center gap-1.5">
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-                        <span>ìˆ˜ì… í˜„í™©</span>
+                        <span>¼öÀÔ ÇöÈ²</span>
                       </h4>
                       <span className="text-xs font-bold text-emerald-600 bg-white px-2 py-0.5 rounded-full border border-emerald-100">
-                        ì´ {getMonthlyIncomes(selectedMonth).length}ê±´
+                        ÃÑ {getMonthlyIncomes(selectedMonth).length}°Ç
                       </span>
                     </div>
 
                     <div className="space-y-1">
-                      <span className="text-xs text-slate-500 block">ë‹¹ì›” ì‹¤ì§ˆ ì´ ìˆ˜ì…</span>
+                      <span className="text-xs text-slate-500 block">´ç¿ù ½ÇÁú ÃÑ ¼öÀÔ</span>
                       <strong className="text-2xl sm:text-3xl font-mono text-emerald-700 font-black tracking-tight">
-                        {activeIncomeTotal.toLocaleString()}ì›
+                        {activeIncomeTotal.toLocaleString()}¿ø
                       </strong>
                     </div>
 
                     {/* Category Breakdown list for Income */}
                     <div className="space-y-3 pt-2">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">ì¹´í…Œê³ ë¦¬ë³„ ì„¸ë¶€ë‚´ì—­</span>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Ä«Å×°í¸®º° ¼¼ºÎ³»¿ª</span>
                       {getMonthlyIncomes(selectedMonth).length === 0 ? (
-                        <p className="text-xs text-slate-400 text-center py-6">ì„ íƒí•œ ì›”ì— í™œì„±í™”ëœ ìˆ˜ì… í•­ëª©ì´ ì—†ìŠµë‹ˆë‹¤.</p>
+                        <p className="text-xs text-slate-400 text-center py-6">¼±ÅÃÇÑ ¿ù¿¡ È°¼ºÈ­µÈ ¼öÀÔ Ç×¸ñÀÌ ¾ø½À´Ï´Ù.</p>
                       ) : (
                         Object.entries(
                           getMonthlyIncomes(selectedMonth).reduce((acc, curr) => {
@@ -2434,15 +2567,15 @@ ${question}`;
                             <div key={category} className="space-y-1.5">
                               <div className="flex justify-between items-center gap-2 flex-wrap text-xs font-semibold text-slate-700">
                                 <span className="truncate">{category}</span>
-                                <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}ì› ({percent}%)</span>
+                                <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}¿ø ({percent}%)</span>
                               </div>
                               <input
                                 type="text"
-                                placeholder="ì§ì ‘ ë©”ëª¨ ì…ë ¥..."
+                                placeholder="Á÷Á¢ ¸Ş¸ğ ÀÔ·Â..."
                                 value={categoryMemos[selectedMonth]?.[category] || ""}
                                 onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
                                 className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate"
-                                title="ëŒ€ë¶„ë¥˜ ë©”ëª¨ (ìë™ ì €ì¥)"
+                                title="´ëºĞ·ù ¸Ş¸ğ (ÀÚµ¿ ÀúÀå)"
                               />
                               <div className="w-full bg-slate-100/70 rounded-full h-2 overflow-hidden">
                                 <div className="bg-emerald-500 h-2 rounded-full" style={{ width: `${percent}%` }}></div>
@@ -2459,21 +2592,21 @@ ${question}`;
                     <div className="flex justify-between items-center border-b border-rose-100/30 pb-2">
                       <h4 className="text-sm font-bold text-rose-800 flex items-center gap-1.5">
                         <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
-                        <span>ì§€ì¶œ í˜„í™©</span>
+                        <span>ÁöÃâ ÇöÈ²</span>
                       </h4>
                       <span className="text-xs font-bold text-rose-600 bg-white px-2 py-0.5 rounded-full border border-rose-100">
-                        ì´ {getMonthlyExpenses(selectedMonth).length}ê±´
+                        ÃÑ {getMonthlyExpenses(selectedMonth).length}°Ç
                       </span>
                     </div>
 
                     <div className="space-y-1">
-                      <span className="text-xs text-slate-500 block">ë‹¹ì›” ì‹¤ì§ˆ ì´ ì§€ì¶œ</span>
+                      <span className="text-xs text-slate-500 block">´ç¿ù ½ÇÁú ÃÑ ÁöÃâ</span>
                       <strong className="text-2xl sm:text-3xl font-mono text-rose-700 font-black tracking-tight">
-                        {activeExpenseTotal.toLocaleString()}ì›
+                        {activeExpenseTotal.toLocaleString()}¿ø
                       </strong>
                     </div>
 
-                    {/* ì§€ì¶œ ì¹´í…Œê³ ë¦¬ ë¹„ì¤‘ ë„ë„› ì°¨íŠ¸ (4ë²ˆ: ì¬ë¬´ì  ì§€ì¶œ ë¶„ì„ ë¹„ì¤‘ ì‹œê°í™”) */}
+                    {/* ÁöÃâ Ä«Å×°í¸® ºñÁß µµ³Ó Â÷Æ® (4¹ø: Àç¹«Àû ÁöÃâ ºĞ¼® ºñÁß ½Ã°¢È­) */}
                     {getMonthlyExpenses(selectedMonth).length > 0 && (
                       <div className="bg-white/70 rounded-2xl border border-rose-100/50">
                         <SVGMultiPieChart
@@ -2491,9 +2624,9 @@ ${question}`;
 
                     {/* Category Breakdown list for Expense */}
                     <div className="space-y-3 pt-2">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">ì¹´í…Œê³ ë¦¬ë³„ ì„¸ë¶€ë‚´ì—­</span>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Ä«Å×°í¸®º° ¼¼ºÎ³»¿ª</span>
                       {getMonthlyExpenses(selectedMonth).length === 0 ? (
-                        <p className="text-xs text-slate-400 text-center py-6">ì„ íƒí•œ ì›”ì— í™œì„±í™”ëœ ì§€ì¶œ í•­ëª©ì´ ì—†ìŠµë‹ˆë‹¤.</p>
+                        <p className="text-xs text-slate-400 text-center py-6">¼±ÅÃÇÑ ¿ù¿¡ È°¼ºÈ­µÈ ÁöÃâ Ç×¸ñÀÌ ¾ø½À´Ï´Ù.</p>
                       ) : (
                         Object.entries(
                           getMonthlyExpenses(selectedMonth).reduce((acc, curr) => {
@@ -2505,7 +2638,7 @@ ${question}`;
                           const typeA = getCategoryType(catA);
                           const typeB = getCategoryType(catB);
                           if (typeA !== typeB) {
-                            return typeA === "ê³ ì •ë¹„" ? -1 : 1; // "ê³ ì •ë¹„" first, then "ë³€ë™ë¹„"
+                            return typeA === "°íÁ¤ºñ" ? -1 : 1; // "°íÁ¤ºñ" first, then "º¯µ¿ºñ"
                           }
                           return catA.localeCompare(catB);
                         })
@@ -2520,28 +2653,28 @@ ${question}`;
                                   <button
                                     onClick={() => toggleCategoryType(category)}
                                     className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
-                                      catType === "ê³ ì •ë¹„"
+                                      catType === "°íÁ¤ºñ"
                                         ? "bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100"
                                         : "bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100"
                                     }`}
-                                    title="í´ë¦­ ì‹œ ê³ ì •ë¹„ <-> ë³€ë™ë¹„ ì „í™˜"
+                                    title="Å¬¸¯ ½Ã °íÁ¤ºñ <-> º¯µ¿ºñ ÀüÈ¯"
                                   >
                                     [{catType}]
                                   </button>
                                   <span className="font-bold text-slate-900 truncate">{category}</span>
                                 </div>
-                                <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}ì› ({percent}%)</span>
+                                <span className="font-mono text-slate-600 shrink-0">{numAmt.toLocaleString()}¿ø ({percent}%)</span>
                               </div>
                               <input
                                 type="text"
-                                placeholder="ì§ì ‘ ë©”ëª¨ ì…ë ¥..."
+                                placeholder="Á÷Á¢ ¸Ş¸ğ ÀÔ·Â..."
                                 value={categoryMemos[selectedMonth]?.[category] || ""}
                                 onChange={(e) => handleCategoryMemoChange(selectedMonth, category, e.target.value)}
                                 className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1 text-[10px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate"
-                                title="ëŒ€ë¶„ë¥˜ ë©”ëª¨ (ìë™ ì €ì¥)"
+                                title="´ëºĞ·ù ¸Ş¸ğ (ÀÚµ¿ ÀúÀå)"
                               />
                               <div className="w-full bg-slate-100/70 rounded-full h-2 overflow-hidden">
-                                <div className={`h-2 rounded-full ${catType === "ê³ ì •ë¹„" ? "bg-indigo-500" : "bg-orange-500"}`} style={{ width: `${percent}%` }}></div>
+                                <div className={`h-2 rounded-full ${catType === "°íÁ¤ºñ" ? "bg-indigo-500" : "bg-orange-500"}`} style={{ width: `${percent}%` }}></div>
                               </div>
                             </div>
                           );
@@ -2559,20 +2692,20 @@ ${question}`;
                 }`}>
                   <div className="space-y-0.5">
                     <p className="text-xs sm:text-sm font-bold flex items-center gap-1.5">
-                      {netMonthlyIncome >= 0 ? "ğŸŸ¢ ë‹¹ì›” ì¢…í•© ì¬ì • ê±´ì „ì„±: í‘ì" : "ğŸ”´ ë‹¹ì›” ì¢…í•© ì¬ì • ê±´ì „ì„±: ì ì ëª¨ë‹ˆí„°ë§"}
+                      {netMonthlyIncome >= 0 ? "?? ´ç¿ù Á¾ÇÕ ÀçÁ¤ °ÇÀü¼º: ÈæÀÚ" : "?? ´ç¿ù Á¾ÇÕ ÀçÁ¤ °ÇÀü¼º: ÀûÀÚ ¸ğ´ÏÅÍ¸µ"}
                     </p>
                     <p className="text-[11px] text-slate-500">
                       {netMonthlyIncome >= 0
-                        ? "ì´ë²ˆ ë‹¬ì€ ì•ˆì •ì ì¸ íë¦„ìœ¼ë¡œ ìˆ˜ì…ì´ ì§€ì¶œë³´ë‹¤ ë§ì•„ í‘ì ì¬ì •ì„ ìœ ì§€ ì¤‘ì…ë‹ˆë‹¤."
-                        : "ì´ë²ˆ ë‹¬ì€ ì§€ì¶œì´ ìˆ˜ì…ì„ ì´ˆê³¼í•˜ì˜€ìŠµë‹ˆë‹¤. ì£¼ë‹´ëŒ€ ì´ì ë‚©ì… ë˜ëŠ” ì¼ì‹œì  ì´ì‚¬ ë¹„ìš© ì˜í–¥ì„ ì ê²€í•˜ì„¸ìš”."}
+                        ? "ÀÌ¹ø ´ŞÀº ¾ÈÁ¤ÀûÀÎ Èå¸§À¸·Î ¼öÀÔÀÌ ÁöÃâº¸´Ù ¸¹¾Æ ÈæÀÚ ÀçÁ¤À» À¯Áö ÁßÀÔ´Ï´Ù."
+                        : "ÀÌ¹ø ´ŞÀº ÁöÃâÀÌ ¼öÀÔÀ» ÃÊ°úÇÏ¿´½À´Ï´Ù. ÁÖ´ã´ë ÀÌÀÚ ³³ÀÔ ¶Ç´Â ÀÏ½ÃÀû ÀÌ»ç ºñ¿ë ¿µÇâÀ» Á¡°ËÇÏ¼¼¿ä."}
                     </p>
                   </div>
                   <div className="font-mono text-right shrink-0">
-                    <span className="text-xs block text-slate-400 font-sans">ì‹¤ì§ˆ ìµœì¢… ìˆœìˆ˜ì§€</span>
+                    <span className="text-xs block text-slate-400 font-sans">½ÇÁú ÃÖÁ¾ ¼ø¼öÁö</span>
                     <strong className={`text-base sm:text-lg font-black ${
                       netMonthlyIncome >= 0 ? "text-emerald-700" : "text-rose-700"
                     }`}>
-                      {netMonthlyIncome >= 0 ? "+" : ""}{netMonthlyIncome.toLocaleString()}ì›
+                      {netMonthlyIncome >= 0 ? "+" : ""}{netMonthlyIncome.toLocaleString()}¿ø
                     </strong>
                   </div>
                 </div>
@@ -2584,28 +2717,28 @@ ${question}`;
                 {/* Card 1: Total Assets */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_assets">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">ğŸ’µ ê°€ê³„ ì´ ìì‚°</span>
-                    <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">ì˜ˆì ê¸ˆ+íˆ¬ì</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? °¡°è ÃÑ ÀÚ»ê</span>
+                    <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">¿¹Àû±İ+ÅõÀÚ</span>
                   </div>
                   <div className="mt-4">
                     <span className="text-2xl font-black font-mono text-slate-950 tracking-tight">
-                      {totalAssets.toLocaleString()}ì›
+                      {totalAssets.toLocaleString()}¿ø
                     </span>
-                    <p className="text-[11px] text-slate-400 mt-1">ì˜ë²” ìì‚° + ì¬ì€ ìì‚° í•©ì‚° (ì˜ˆì ê¸ˆ, ì£¼ì‹, ì „ìê¸ˆìœµ ì´ì•¡)</p>
+                    <p className="text-[11px] text-slate-400 mt-1">¿µ¹ü ÀÚ»ê + ÀçÀº ÀÚ»ê ÇÕ»ê (¿¹Àû±İ, ÁÖ½Ä, ÀüÀÚ±İÀ¶ ÃÑ¾×)</p>
                   </div>
                 </div>
 
                 {/* Card 2: Total Debt */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_liabilities">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">ğŸš¨ ì´ ë¶€ì±„ (ëŒ€ì¶œ)</span>
-                    <span className="bg-rose-50 text-rose-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">NHì£¼ë‹´ëŒ€</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? ÃÑ ºÎÃ¤ (´ëÃâ)</span>
+                    <span className="bg-rose-50 text-rose-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">NHÁÖ´ã´ë</span>
                   </div>
                   <div className="mt-4">
                     <span className="text-2xl font-black font-mono text-rose-600 tracking-tight">
-                      {totalLiabilities.toLocaleString()}ì›
+                      {totalLiabilities.toLocaleString()}¿ø
                     </span>
-                    <p className="text-[11px] text-slate-400 mt-1">ê³ ì •ê¸ˆë¦¬ {LIABILITY_MORTGAGE.rate}% ì¥ê¸° ì£¼íƒë‹´ë³´</p>
+                    <p className="text-[11px] text-slate-400 mt-1">°íÁ¤±İ¸® {LIABILITY_MORTGAGE.rate}% Àå±â ÁÖÅÃ´ãº¸</p>
                   </div>
                 </div>
 
@@ -2616,21 +2749,21 @@ ${question}`;
                     : "bg-white border-slate-200"
                 }`} id="kpi_card_net_worth">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">ğŸ“‰ ìˆœê¸ˆìœµìì‚°</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? ¼ø±İÀ¶ÀÚ»ê</span>
                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold ${
                       netWorth < 0 ? "bg-rose-100 text-rose-800" : "bg-emerald-100 text-emerald-800"
                     }`}>
-                      {netWorth < 0 ? "âš ï¸ ë ˆë²„ë¦¬ì§€" : "ìˆœìì‚° í‘ì"}
+                      {netWorth < 0 ? "?? ·¹¹ö¸®Áö" : "¼øÀÚ»ê ÈæÀÚ"}
                     </span>
                   </div>
                   <div className="mt-4">
                     <span className={`text-2xl font-black font-mono tracking-tight ${
                       netWorth < 0 ? "text-rose-700" : "text-emerald-700"
                     }`}>
-                      {netWorth.toLocaleString()}ì›
+                      {netWorth.toLocaleString()}¿ø
                     </span>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      {netWorth < 0 ? "ë‚´ì§‘ë§ˆë ¨ ëŒ€ì¶œ ë°˜ì˜ì— ë”°ë¥¸ ìˆœìœµì" : "ê¸ˆìœµ ì•ˆì „ë§ ì—¬ìœ  ìƒíƒœ"}
+                      {netWorth < 0 ? "³»Áı¸¶·Ã ´ëÃâ ¹İ¿µ¿¡ µû¸¥ ¼øÀ¶ÀÚ" : "±İÀ¶ ¾ÈÀü¸Á ¿©À¯ »óÅÂ"}
                     </p>
                   </div>
                 </div>
@@ -2641,13 +2774,13 @@ ${question}`;
                 <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start space-x-3.5 text-rose-950 shadow-xs" id="net_worth_warning_alert">
                   <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
                   <div className="space-y-1.5 text-xs sm:text-sm">
-                    <h4 className="font-bold text-rose-900">ê°€ê³„ ìˆœê¸ˆìœµìì‚° ëª¨ë‹ˆí„°ë§ ê²½ë³´</h4>
+                    <h4 className="font-bold text-rose-900">°¡°è ¼ø±İÀ¶ÀÚ»ê ¸ğ´ÏÅÍ¸µ °æº¸</h4>
                     <p className="leading-relaxed text-rose-800">
-                      í˜„ì¬ ìš°ë¦¬ ê°€ê³„ëŠ” ì´ ë¶€ì±„(<span className="font-mono font-semibold">{totalLiabilities.toLocaleString()}ì›</span>)ê°€ 
-                      í†µí•© ê¸ˆìœµ ìì‚°(<span className="font-mono font-semibold">{totalAssets.toLocaleString()}ì›</span>)ì„ ì´ˆê³¼í•˜ì—¬ 
-                      ìˆœê¸ˆìœµìì‚°ì´ <span className="font-mono font-bold text-rose-700">{netWorth.toLocaleString()}ì›</span>ìœ¼ë¡œ ë§ˆì´ë„ˆìŠ¤ ìƒíƒœì…ë‹ˆë‹¤. 
-                      ì´ëŠ” ë‚´ ì§‘ ë§ˆë ¨ì„ ìœ„í•œ ì¥ê¸° ì£¼íƒë‹´ë³´ëŒ€ì¶œ ì‹¤í–‰ì— ë”°ë¥¸ ìì—°ìŠ¤ëŸ¬ìš´ ìƒíƒœì…ë‹ˆë‹¤.
-                      í–¥í›„ <strong>ì§€ì¶œê³¼ ìˆ˜ì… íƒ­</strong> ë° <strong>ìì‚° ë° ë¶€ì±„ íƒ­</strong>ì˜ ìƒí™˜ ì‹œë®¬ë ˆì´ì…˜ì„ í†µí•´ ì£¼ê¸°ì ì¸ ê³„íšì„ ì„¤ê³„í•˜ì„¸ìš”.
+                      ÇöÀç ¿ì¸® °¡°è´Â ÃÑ ºÎÃ¤(<span className="font-mono font-semibold">{totalLiabilities.toLocaleString()}¿ø</span>)°¡ 
+                      ÅëÇÕ ±İÀ¶ ÀÚ»ê(<span className="font-mono font-semibold">{totalAssets.toLocaleString()}¿ø</span>)À» ÃÊ°úÇÏ¿© 
+                      ¼ø±İÀ¶ÀÚ»êÀÌ <span className="font-mono font-bold text-rose-700">{netWorth.toLocaleString()}¿ø</span>À¸·Î ¸¶ÀÌ³Ê½º »óÅÂÀÔ´Ï´Ù. 
+                      ÀÌ´Â ³» Áı ¸¶·ÃÀ» À§ÇÑ Àå±â ÁÖÅÃ´ãº¸´ëÃâ ½ÇÇà¿¡ µû¸¥ ÀÚ¿¬½º·¯¿î »óÅÂÀÔ´Ï´Ù.
+                      ÇâÈÄ <strong>ÁöÃâ°ú ¼öÀÔ ÅÇ</strong> ¹× <strong>ÀÚ»ê ¹× ºÎÃ¤ ÅÇ</strong>ÀÇ »óÈ¯ ½Ã¹Ä·¹ÀÌ¼ÇÀ» ÅëÇØ ÁÖ±âÀûÀÎ °èÈ¹À» ¼³°èÇÏ¼¼¿ä.
                     </p>
                   </div>
                 </div>
@@ -2662,15 +2795,15 @@ ${question}`;
                     <div>
                       <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                         <CheckSquare className="w-5 h-5 text-emerald-600" />
-                        <span>ğŸ“‹ ì´ë²ˆ ë‹¬ ì£¼ìš” ì¬ì • ì²´í¬ë¦¬ìŠ¤íŠ¸</span>
+                        <span>?? ÀÌ¹ø ´Ş ÁÖ¿ä ÀçÁ¤ Ã¼Å©¸®½ºÆ®</span>
                       </h4>
-                      <p className="text-[11px] text-slate-400">ì´ë²ˆ ë‹¬ ì±™ê²¨ì•¼ í•  í•µì‹¬ ê°€ê³„ ì´ì²´ ë° ìš´ìš© ì—…ë¬´</p>
+                      <p className="text-[11px] text-slate-400">ÀÌ¹ø ´Ş Ã¬°Ü¾ß ÇÒ ÇÙ½É °¡°è ÀÌÃ¼ ¹× ¿î¿ë ¾÷¹«</p>
                     </div>
                     
                     {/* Mission completion rate badge */}
                     <div className="text-right">
                       <span className="text-[10px] font-mono font-bold bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg text-slate-700">
-                        ì™„ë£Œ: {checklist.filter(c => c.done).length}/{checklist.length}
+                        ¿Ï·á: {checklist.filter(c => c.done).length}/{checklist.length}
                       </span>
                     </div>
                   </div>
@@ -2678,7 +2811,7 @@ ${question}`;
                   {/* Tasks List */}
                   <div className="space-y-3" id="checklist_items">
                     {checklist.length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">ì²´í¬ë¦¬ìŠ¤íŠ¸ í•­ëª©ì´ ì—†ìŠµë‹ˆë‹¤. ì•„ë˜ì—ì„œ ì¶”ê°€í•´ ë³´ì„¸ìš”.</p>
+                      <p className="text-xs text-slate-400 text-center py-6">Ã¼Å©¸®½ºÆ® Ç×¸ñÀÌ ¾ø½À´Ï´Ù. ¾Æ·¡¿¡¼­ Ãß°¡ÇØ º¸¼¼¿ä.</p>
                     ) : (
                       checklist.map((item) => (
                         <div
@@ -2705,7 +2838,7 @@ ${question}`;
                           <button
                             onClick={() => handleDeleteChecklistItem(item.id)}
                             className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-white transition-colors cursor-pointer shrink-0"
-                            title="í•­ëª© ì‚­ì œ"
+                            title="Ç×¸ñ »èÁ¦"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -2727,21 +2860,21 @@ ${question}`;
                     <input
                       name="newChecklistLabel"
                       type="text"
-                      placeholder="ìƒˆ ì²´í¬ë¦¬ìŠ¤íŠ¸ í•­ëª© ì¶”ê°€..."
+                      placeholder="»õ Ã¼Å©¸®½ºÆ® Ç×¸ñ Ãß°¡..."
                       className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     />
                     <button
                       type="submit"
                       className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shrink-0 cursor-pointer"
                     >
-                      ì¶”ê°€
+                      Ãß°¡
                     </button>
                   </form>
 
                   {/* Progress Bar */}
                   <div className="space-y-1.5 pt-2">
                     <div className="flex justify-between text-xs text-slate-500">
-                      <span>ë¯¸ì…˜ ë‹¬ì„±ë¥ </span>
+                      <span>¹Ì¼Ç ´Ş¼º·ü</span>
                       <span className="font-bold text-slate-800">
                         {checklist.length > 0 ? Math.round((checklist.filter(c => c.done).length / checklist.length) * 100) : 0}%
                       </span>
@@ -2761,33 +2894,33 @@ ${question}`;
                     <div className="border-b border-slate-100 pb-4">
                       <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                         <CreditCard className="w-5 h-5 text-emerald-600" />
-                        <span>ğŸ¦ NH ì£¼íƒë‹´ë³´ëŒ€ì¶œ ìŠ¤í™</span>
+                        <span>?? NH ÁÖÅÃ´ãº¸´ëÃâ ½ºÆå</span>
                       </h4>
-                      <p className="text-[11px] text-slate-400">ë†í˜‘ì€í–‰ ì£¼íƒ êµ¬ì… ìê¸ˆ ëŒ€ì¶œ ì •ë³´</p>
+                      <p className="text-[11px] text-slate-400">³óÇùÀºÇà ÁÖÅÃ ±¸ÀÔ ÀÚ±İ ´ëÃâ Á¤º¸</p>
                     </div>
 
                     <div className="space-y-3 text-xs sm:text-sm" id="mortgage_specs">
                       <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">ëŒ€ì¶œ ì•½ì • ê¸°ê´€</span>
-                        <span className="font-bold text-slate-900">NHë†í˜‘ì€í–‰</span>
+                        <span className="text-slate-500">´ëÃâ ¾àÁ¤ ±â°ü</span>
+                        <span className="font-bold text-slate-900">NH³óÇùÀºÇà</span>
                       </div>
                       <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">ìµœì´ˆ ëŒ€ì¶œ ì›ê¸ˆ</span>
-                        <span className="font-bold font-mono text-slate-900">600,000,000ì›</span>
+                        <span className="text-slate-500">ÃÖÃÊ ´ëÃâ ¿ø±İ</span>
+                        <span className="font-bold font-mono text-slate-900">600,000,000¿ø</span>
                       </div>
                       <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">ì•½ì • ì—° ì´ììœ¨</span>
+                        <span className="text-slate-500">¾àÁ¤ ¿¬ ÀÌÀÚÀ²</span>
                         <span className="font-bold text-emerald-600 flex items-center">
                           <Percent className="w-3.5 h-3.5 mr-0.5" />
                           <span>{LIABILITY_MORTGAGE.rate}%</span>
                         </span>
                       </div>
                       <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">ëŒ€ì¶œ ì‹ ê·œ ì¼ì</span>
+                        <span className="text-slate-500">´ëÃâ ½Å±Ô ÀÏÀÚ</span>
                         <span className="font-semibold text-slate-800">{LIABILITY_MORTGAGE.startDate}</span>
                       </div>
                       <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">ëŒ€ì¶œ ë§Œê¸° ì¼ì</span>
+                        <span className="text-slate-500">´ëÃâ ¸¸±â ÀÏÀÚ</span>
                         <span className="font-semibold text-slate-800">{LIABILITY_MORTGAGE.endDate}</span>
                       </div>
                     </div>
@@ -2795,39 +2928,39 @@ ${question}`;
 
                   {/* Quick Monthly Interest Box */}
                   <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center space-y-1" id="mortgage_quick_interest">
-                    <span className="text-[10px] text-slate-500 block">ë§¤ì›” ê³ ì • ì•½ì • ì´ì ì˜ˆìƒì•¡</span>
+                    <span className="text-[10px] text-slate-500 block">¸Å¿ù °íÁ¤ ¾àÁ¤ ÀÌÀÚ ¿¹»ó¾×</span>
                     <strong className="text-lg font-mono text-slate-950 font-black">
-                      {Math.round((LIABILITY_MORTGAGE.amount * (LIABILITY_MORTGAGE.rate / 100)) / 12).toLocaleString()}ì›
+                      {Math.round((LIABILITY_MORTGAGE.amount * (LIABILITY_MORTGAGE.rate / 100)) / 12).toLocaleString()}¿ø
                     </strong>
-                    <p className="text-[9px] text-slate-400">ì¼í•  ê³„ì‚° ì •ì‚° ê¸°ì¤€ì— ë”°ë¼ ì‹¤ì œ ë¶€ê³¼ì•¡ ë³€ë™ ê°€ëŠ¥</p>
+                    <p className="text-[9px] text-slate-400">ÀÏÇÒ °è»ê Á¤»ê ±âÁØ¿¡ µû¶ó ½ÇÁ¦ ºÎ°ú¾× º¯µ¿ °¡´É</p>
                   </div>
 
                 </div>
 
               </div>
 
-              {/* Gemini AI ë°ì´í„° ë¶„ì„ ì±—ë´‡ */}
+              {/* Gemini AI µ¥ÀÌÅÍ ºĞ¼® Ãªº¿ */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4" id="gemini_chatbot_panel">
                 <div>
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">ğŸ¤–</span>
-                    <span>Gemini ë°ì´í„° ë¶„ì„ ì±—ë´‡</span>
+                    <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">??</span>
+                    <span>Gemini µ¥ÀÌÅÍ ºĞ¼® Ãªº¿</span>
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    ì—…ë¡œë“œëœ ìˆ˜ì…/ì§€ì¶œ ë‚´ì—­ê³¼ ìì‚° ë°ì´í„°ë¥¼ ë°”íƒ•ìœ¼ë¡œ ì§ˆë¬¸ì— ë‹µí•©ë‹ˆë‹¤. (ì˜ˆ: "6ì›”ë³´ë‹¤ 7ì›”ì— ì§€ì¶œì„ ì–¼ë§ˆ ë” í–ˆì–´?")
+                    ¾÷·ÎµåµÈ ¼öÀÔ/ÁöÃâ ³»¿ª°ú ÀÚ»ê µ¥ÀÌÅÍ¸¦ ¹ÙÅÁÀ¸·Î Áú¹®¿¡ ´äÇÕ´Ï´Ù. (¿¹: "6¿ùº¸´Ù 7¿ù¿¡ ÁöÃâÀ» ¾ó¸¶ ´õ Çß¾î?")
                   </p>
                 </div>
 
                 <div className="bg-indigo-50 border border-indigo-100 rounded-2xl px-4 py-3">
-                  <p className="text-xs font-bold text-indigo-700">Gemini ìë™ ì—°ê²°</p>
+                  <p className="text-xs font-bold text-indigo-700">Gemini ÀÚµ¿ ¿¬°á</p>
                   <p className="text-[11px] text-indigo-500 mt-0.5">
-                    ë¸Œë¼ìš°ì € í‚¤ ì…ë ¥ ì—†ì´ Vercel í™˜ê²½ë³€ìˆ˜ GEMINI_API_KEYë¡œ gemini-2.5-flashë¥¼ í˜¸ì¶œí•©ë‹ˆë‹¤.
+                    ºê¶ó¿ìÀú Å° ÀÔ·Â ¾øÀÌ Vercel È¯°æº¯¼ö GEMINI_API_KEY·Î gemini-1.5-flash¸¦ È£ÃâÇÕ´Ï´Ù.
                   </p>
                 </div>
 
                 <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-3 max-h-80 overflow-y-auto" id="gemini_chat_messages">
                   {chatMessages.length === 0 ? (
-                    <p className="text-xs text-slate-400 text-center py-6">ì•„ì§ ëŒ€í™”ê°€ ì—†ìŠµë‹ˆë‹¤. ì•„ë˜ì— ì§ˆë¬¸ì„ ì…ë ¥í•´ ë³´ì„¸ìš”.</p>
+                    <p className="text-xs text-slate-400 text-center py-6">¾ÆÁ÷ ´ëÈ­°¡ ¾ø½À´Ï´Ù. ¾Æ·¡¿¡ Áú¹®À» ÀÔ·ÂÇØ º¸¼¼¿ä.</p>
                   ) : (
                     chatMessages.map((msg, i) => (
                       <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
@@ -2839,7 +2972,7 @@ ${question}`;
                   )}
                   {chatLoading && (
                     <div className="flex justify-start">
-                      <div className="bg-white border border-slate-200 text-slate-400 rounded-2xl px-4 py-2.5 text-xs">ë‹µë³€ ìƒì„± ì¤‘...</div>
+                      <div className="bg-white border border-slate-200 text-slate-400 rounded-2xl px-4 py-2.5 text-xs">´äº¯ »ı¼º Áß...</div>
                     </div>
                   )}
                 </div>
@@ -2853,7 +2986,7 @@ ${question}`;
                     type="text"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="ì˜ˆ: 6ì›”ë³´ë‹¤ 7ì›”ì— ì§€ì¶œì„ ì–¼ë§ˆ ë” í–ˆì–´?"
+                    placeholder="¿¹: 6¿ùº¸´Ù 7¿ù¿¡ ÁöÃâÀ» ¾ó¸¶ ´õ Çß¾î?"
                     className="flex-1 bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   <button
@@ -2861,7 +2994,7 @@ ${question}`;
                     disabled={chatLoading}
                     className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-300 text-white font-bold text-xs sm:text-sm px-5 py-2 rounded-xl transition-all shrink-0"
                   >
-                    ì „ì†¡
+                    Àü¼Û
                   </button>
                 </form>
               </div>
@@ -2869,7 +3002,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 2: ğŸ’¸ ì§€ì¶œê³¼ ìˆ˜ì… (Interactive Ledger)
+              TAB 2: ?? ÁöÃâ°ú ¼öÀÔ (Interactive Ledger)
              ========================================== */}
           {activeTab === "ledger" && (
             <div className="space-y-8" id="ledger_tab">
@@ -2877,11 +3010,11 @@ ${question}`;
               {/* Explanatory Card */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-2" id="ledger_intro">
                 <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span>ğŸ’¸</span> ì›”ë³„ ê°€ê³„ë¶€ ì§€ì¶œÂ·ìˆ˜ì… ìœ íš¨ë°˜ì˜ ì œì–´ê¸°
+                  <span>??</span> ¿ùº° °¡°èºÎ ÁöÃâ¡¤¼öÀÔ À¯È¿¹İ¿µ Á¦¾î±â
                 </h3>
                 <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
-                  ê° í–‰ ì™¼ìª½ì˜ <strong>'ìœ íš¨ë°˜ì˜' ì²´í¬ë°•ìŠ¤</strong>ë¥¼ ë„ê±°ë‚˜ ì¼¬ìœ¼ë¡œì¨ ì‹¤ì œ ê°€ê³„ ìš´ìš© ê²°ê³¼ì— í•©ì‚°í• ì§€ ì—¬ë¶€ë¥¼ ì‹¤ì‹œê°„ìœ¼ë¡œ ì„ íƒí•  ìˆ˜ ìˆìŠµë‹ˆë‹¤. 
-                  ëª¨ì˜ ì…ë ¥ ê¸°ëŠ¥ì„ í™œìš©í•´ ê°€ìƒì˜ ì§€ì¶œì´ë‚˜ ìˆ˜ì… ì¼ì •ì„ ì¶”ê°€í•˜ê³  í‘ì/ì ì ìƒí™©ì„ ë¯¸ë¦¬ í…ŒìŠ¤íŠ¸í•´ ë³´ì„¸ìš”.
+                  °¢ Çà ¿ŞÂÊÀÇ <strong>'À¯È¿¹İ¿µ' Ã¼Å©¹Ú½º</strong>¸¦ ²ô°Å³ª ÄÔÀ¸·Î½á ½ÇÁ¦ °¡°è ¿î¿ë °á°ú¿¡ ÇÕ»êÇÒÁö ¿©ºÎ¸¦ ½Ç½Ã°£À¸·Î ¼±ÅÃÇÒ ¼ö ÀÖ½À´Ï´Ù. 
+                  ¸ğÀÇ ÀÔ·Â ±â´ÉÀ» È°¿ëÇØ °¡»óÀÇ ÁöÃâÀÌ³ª ¼öÀÔ ÀÏÁ¤À» Ãß°¡ÇÏ°í ÈæÀÚ/ÀûÀÚ »óÈ²À» ¹Ì¸® Å×½ºÆ®ÇØ º¸¼¼¿ä.
                 </p>
               </div>
 
@@ -2890,7 +3023,7 @@ ${question}`;
                 <div className="space-y-3 w-full md:w-auto">
                   <div className="flex items-center justify-between md:justify-start gap-4">
                     <span className="text-xs sm:text-sm font-bold text-slate-700 flex items-center gap-1.5">
-                      <span>ğŸ“…</span> ì¡°íšŒ ëª¨ë“œ:
+                      <span>??</span> Á¶È¸ ¸ğµå:
                     </span>
                     <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner">
                       <button
@@ -2904,7 +3037,7 @@ ${question}`;
                           !isMultiMonth ? "bg-white text-slate-800 shadow-sm font-black" : "text-slate-500 hover:text-slate-800"
                         }`}
                       >
-                        ë‹¨ì¼ ì›” ì¡°íšŒ
+                        ´ÜÀÏ ¿ù Á¶È¸
                       </button>
                       <button
                         onClick={() => {
@@ -2917,14 +3050,14 @@ ${question}`;
                           isMultiMonth ? "bg-white text-slate-800 shadow-sm font-black" : "text-slate-500 hover:text-slate-800"
                         }`}
                       >
-                        ë‹¤ì¤‘ ì›” ì„ íƒ í† ê¸€
+                        ´ÙÁß ¿ù ¼±ÅÃ Åä±Û
                       </button>
                     </div>
                   </div>
 
                   {!isMultiMonth ? (
                     <div className="flex items-center space-x-3">
-                      <span className="text-xs font-bold text-slate-500">ì¡°íšŒ ëŒ€ìƒ ì›” ì„ íƒ:</span>
+                      <span className="text-xs font-bold text-slate-500">Á¶È¸ ´ë»ó ¿ù ¼±ÅÃ:</span>
                       <select
                         value={selectedMonth}
                         onChange={(e) => setSelectedMonth(e.target.value)}
@@ -2932,13 +3065,13 @@ ${question}`;
                         id="ledger_month_selector"
                       >
                         {uniqueMonths.map((m) => (
-                          <option key={m} value={m}>{m.replace("-", "ë…„ ")}ì›”</option>
+                          <option key={m} value={m}>{m.replace("-", "³â ")}¿ù</option>
                         ))}
                       </select>
                     </div>
                   ) : (
                     <div className="space-y-1.5">
-                      <span className="text-xs font-bold text-slate-500 block">ì›ì¥ í•©ì‚° ëŒ€ìƒ ì›” ë³µìˆ˜ ì„ íƒ (í† ê¸€):</span>
+                      <span className="text-xs font-bold text-slate-500 block">¿øÀå ÇÕ»ê ´ë»ó ¿ù º¹¼ö ¼±ÅÃ (Åä±Û):</span>
                       <div className="flex flex-wrap gap-1.5">
                         {uniqueMonths.map((m) => {
                           const isSelected = selectedMonths.includes(m);
@@ -2950,7 +3083,7 @@ ${question}`;
                                   if (selectedMonths.length > 1) {
                                     setSelectedMonths(prev => prev.filter(x => x !== m));
                                   } else {
-                                    alert("ìµœì†Œ í•œ ê°œì˜ ì›”ì€ ì„ íƒë˜ì–´ì•¼ í•©ë‹ˆë‹¤.");
+                                    alert("ÃÖ¼Ò ÇÑ °³ÀÇ ¿ùÀº ¼±ÅÃµÇ¾î¾ß ÇÕ´Ï´Ù.");
                                   }
                                 } else {
                                   setSelectedMonths(prev => [...prev, m].sort());
@@ -2962,7 +3095,7 @@ ${question}`;
                                   : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
                               }`}
                             >
-                              {m.replace("-", "ë…„ ")}ì›”
+                              {m.replace("-", "³â ")}¿ù
                             </button>
                           );
                         })}
@@ -2973,24 +3106,24 @@ ${question}`;
                 
                 <div className="text-[11px] sm:text-xs text-slate-500 font-bold bg-slate-50 border border-slate-200 rounded-2xl px-4 py-2 text-right self-stretch md:self-auto flex flex-col justify-center">
                   <div>
-                    í˜„ì¬ ì¡°íšŒ ë²”ìœ„:{" "}
+                    ÇöÀç Á¶È¸ ¹üÀ§:{" "}
                     <span className="text-slate-900 font-black">
-                      {isMultiMonth ? selectedMonths.map(m => m.substring(5) + "ì›”").join(", ") : `${selectedMonth.substring(5)}ì›”`}
+                      {isMultiMonth ? selectedMonths.map(m => m.substring(5) + "¿ù").join(", ") : `${selectedMonth.substring(5)}¿ù`}
                     </span>
                   </div>
                   <div className="text-[10px] text-slate-400 mt-1 font-normal">
-                    ì„ íƒ ë²”ìœ„ ë‚´ì—­ ì´{" "}
+                    ¼±ÅÃ ¹üÀ§ ³»¿ª ÃÑ{" "}
                     <span className="text-slate-900 font-bold">
                       {ledger.filter(x => isMultiMonth ? selectedMonths.includes(x.month) : x.month === selectedMonth).length}
                     </span>
-                    ê°œ í™œì„±í™”
+                    °³ È°¼ºÈ­
                   </div>
                 </div>
               </div>
 
-              {/* ì •ë ¬ ê¸°ì¤€ ì„ íƒ: ë‚ ì§œìˆœ vs ì§€ì¶œìë³„ */}
+              {/* Á¤·Ä ±âÁØ ¼±ÅÃ: ³¯Â¥¼ø vs ÁöÃâÀÚº° */}
               <div className="flex items-center gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3" id="ledger_sort_mode_toggle">
-                <span className="text-xs font-bold text-slate-600">ì •ë ¬ ê¸°ì¤€:</span>
+                <span className="text-xs font-bold text-slate-600">Á¤·Ä ±âÁØ:</span>
                 <button
                   type="button"
                   onClick={() => setLedgerSortMode("date")}
@@ -2998,7 +3131,7 @@ ${question}`;
                     ledgerSortMode === "date" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
                   }`}
                 >
-                  ë‚ ì§œìˆœ
+                  ³¯Â¥¼ø
                 </button>
                 <button
                   type="button"
@@ -3007,60 +3140,8 @@ ${question}`;
                     ledgerSortMode === "spender" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
                   }`}
                 >
-                  ì§€ì¶œìë³„
+                  ÁöÃâÀÚº°
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setLedgerSortMode("amount")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    ledgerSortMode === "amount" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                  }`}
-                >
-                  ê¸ˆì•¡ìˆœ
-                </button>
-              </div>
-
-              <div className="flex flex-col md:flex-row gap-3 bg-white rounded-2xl border border-slate-200 shadow-sm p-3" id="ledger_search_filter_bar">
-                <div className="flex items-center gap-2 flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
-                  <Search className="w-4 h-4 text-slate-500 shrink-0" />
-                  <input
-                    type="text"
-                    value={ledgerSearchQuery}
-                    onChange={(e) => setLedgerSearchQuery(e.target.value)}
-                    placeholder="ê±°ë˜ëª…, ì¹´í…Œê³ ë¦¬, ë©”ëª¨, ì§€ì¶œì ê²€ìƒ‰"
-                    className="w-full min-w-0 bg-transparent text-xs sm:text-sm text-slate-800 placeholder-slate-400 focus:outline-none"
-                  />
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-bold text-slate-600">ë¶„ë¥˜:</span>
-                  <button
-                    type="button"
-                    onClick={() => setLedgerReflectionFilter("all")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      ledgerReflectionFilter === "all" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                    }`}
-                  >
-                    ì „ì²´
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLedgerReflectionFilter("active")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      ledgerReflectionFilter === "active" ? "bg-emerald-600 text-white" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                    }`}
-                  >
-                    ë°˜ì˜
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLedgerReflectionFilter("inactive")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      ledgerReflectionFilter === "inactive" ? "bg-rose-600 text-white" : "bg-rose-50 text-rose-700 hover:bg-rose-100"
-                    }`}
-                  >
-                    ë¯¸ë°˜ì˜
-                  </button>
-                </div>
               </div>
 
               {/* TWO LEDGER COLUMNS FOR INCOME AND EXPENSES */}
@@ -3071,26 +3152,24 @@ ${question}`;
                   <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                     <h4 className="font-bold text-emerald-700 flex items-center space-x-2 text-xs sm:text-sm">
                       <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-                      <span>ğŸŸ¢ ìˆ˜ì… ë‚´ì—­ ë¦¬ìŠ¤íŠ¸</span>
+                      <span>?? ¼öÀÔ ³»¿ª ¸®½ºÆ®</span>
                     </h4>
                     <span className="text-[10px] bg-emerald-50 text-emerald-800 px-2.5 py-0.5 rounded-full font-bold">
-                      ì´ {getLedgerItemsForDisplay("ìˆ˜ì…").length}ê±´
+                      ÃÑ {scopedIncomeItems.length}°Ç
                     </span>
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="income_items_list">
-                    {getLedgerItemsForDisplay("ìˆ˜ì…").length === 0 ? (
-                       <div className="text-center py-12 text-slate-400 text-xs">
-                         {ledger.length === 0 ? "ë“±ë¡ëœ ê°€ê³„ë¶€ ë°ì´í„°ê°€ ì—†ìŠµë‹ˆë‹¤. ì—‘ì…€ íŒŒì¼ì„ ì—…ë¡œë“œí•´ ì£¼ì„¸ìš”." : "ì„ íƒí•œ ë²”ìœ„ì— ìˆ˜ì… ë‚´ì—­ì´ ì—†ìŠµë‹ˆë‹¤."}
-                       </div>
+                    {scopedIncomeItems.length === 0 ? (
+                       <div className="text-center py-12 text-slate-400 text-xs">¼±ÅÃÇÑ ¹üÀ§¿¡ ¼öÀÔ ³»¿ªÀÌ ¾ø½À´Ï´Ù.</div>
                     ) : (
                       groupLedgerItemsForDisplay(
-                        getLedgerItemsForDisplay("ìˆ˜ì…")
+                        scopedIncomeItems
                       ).map((group, gi) => (
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
                             <div className="text-[10px] font-black text-emerald-700 uppercase tracking-wider bg-emerald-50/60 rounded-lg px-2 py-1">
-                              ğŸ‘¤ {group.label} ({group.items.length}ê±´)
+                              ?? {group.label} ({group.items.length}°Ç)
                             </div>
                           )}
                           {group.items.map((item, itemIdx) => (
@@ -3112,9 +3191,9 @@ ${question}`;
                                         ? "bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400 shadow-xs"
                                         : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
                                     }`}
-                                    title="í´ë¦­ ì‹œ ê°€ê³„ ì—°ì‚° ë°˜ì˜ ì—¬ë¶€ ì „í™˜"
+                                    title="Å¬¸¯ ½Ã °¡°è ¿¬»ê ¹İ¿µ ¿©ºÎ ÀüÈ¯"
                                   >
-                                    {item.active ? "ë°˜ì˜" : "ë¯¸ë°˜ì˜"}
+                                    {item.active ? "¹İ¿µ" : "Á¦¿Ü"}
                                   </button>
                                   <div className="min-w-0">
                                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -3131,37 +3210,37 @@ ${question}`;
                                   </div>
                                 </div>
                                 <span className="font-mono text-xs sm:text-sm font-bold text-emerald-600 shrink-0">
-                                  +{item.amount.toLocaleString()}ì›
+                                  +{item.amount.toLocaleString()}¿ø
                                 </span>
                               </div>
 
                               <div className="flex items-center gap-2 flex-wrap mt-2">
                                 <input
                                   type="text"
-                                  placeholder="ë©”ëª¨ ì¶”ê°€..."
+                                  placeholder="¸Ş¸ğ Ãß°¡..."
                                   value={item.memo || ""}
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
                                   }}
                                   className="flex-1 min-w-[90px] bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate font-sans"
-                                  title="ê°œë³„ ê±°ë˜ ë©”ëª¨ (ìë™ ì €ì¥)"
+                                  title="°³º° °Å·¡ ¸Ş¸ğ (ÀÚµ¿ ÀúÀå)"
                                 />
                                 <input
                                   type="text"
-                                  placeholder="ì§€ì¶œì..."
+                                  placeholder="ÁöÃâÀÚ..."
                                   value={item.spender || ""}
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     setLedger(prev => prev.map(x => x.id === item.id ? { ...x, spender: val } : x));
                                   }}
                                   className="w-20 shrink-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500 truncate font-sans"
-                                  title="ì§€ì¶œì (ì˜ˆ: ì˜ë²”, ì¬ì€)"
+                                  title="ÁöÃâÀÚ (¿¹: ¿µ¹ü, ÀçÀº)"
                                 />
                                 <button
                                   onClick={() => handleDeleteItem(item.id)}
                                   className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
-                                  title="ë‚´ì—­ ì‚­ì œ"
+                                  title="³»¿ª »èÁ¦"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -3179,26 +3258,24 @@ ${question}`;
                   <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                     <h4 className="font-bold text-rose-700 flex items-center space-x-2 text-xs sm:text-sm">
                       <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
-                      <span>ğŸ”´ ì§€ì¶œ ë‚´ì—­ ë¦¬ìŠ¤íŠ¸</span>
+                      <span>?? ÁöÃâ ³»¿ª ¸®½ºÆ®</span>
                     </h4>
                     <span className="text-[10px] bg-rose-50 text-rose-800 px-2.5 py-0.5 rounded-full font-bold">
-                      ì´ {getLedgerItemsForDisplay("ì§€ì¶œ").length}ê±´
+                      ÃÑ {scopedExpenseItems.length}°Ç
                     </span>
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2" id="expense_items_list">
-                    {getLedgerItemsForDisplay("ì§€ì¶œ").length === 0 ? (
-                      <div className="text-center py-12 text-slate-400 text-xs">
-                        {ledger.length === 0 ? "ë“±ë¡ëœ ê°€ê³„ë¶€ ë°ì´í„°ê°€ ì—†ìŠµë‹ˆë‹¤. ì—‘ì…€ íŒŒì¼ì„ ì—…ë¡œë“œí•´ ì£¼ì„¸ìš”." : "ì„ íƒí•œ ë²”ìœ„ì— ì§€ì¶œ ë‚´ì—­ì´ ì—†ìŠµë‹ˆë‹¤."}
-                      </div>
+                    {scopedExpenseItems.length === 0 ? (
+                      <div className="text-center py-12 text-slate-400 text-xs">¼±ÅÃÇÑ ¹üÀ§¿¡ ÁöÃâ ³»¿ªÀÌ ¾ø½À´Ï´Ù.</div>
                     ) : (
                       groupLedgerItemsForDisplay(
-                        getLedgerItemsForDisplay("ì§€ì¶œ")
+                        scopedExpenseItems
                       ).map((group, gi) => (
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
                             <div className="text-[10px] font-black text-rose-700 uppercase tracking-wider bg-rose-50/60 rounded-lg px-2 py-1">
-                              ğŸ‘¤ {group.label} ({group.items.length}ê±´)
+                              ?? {group.label} ({group.items.length}°Ç)
                             </div>
                           )}
                           {group.items.map((item, itemIdx) => (
@@ -3220,9 +3297,9 @@ ${question}`;
                                         ? "bg-rose-500 hover:bg-rose-600 text-white border-rose-400 shadow-xs"
                                         : "bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-300"
                                     }`}
-                                    title="í´ë¦­ ì‹œ ê°€ê³„ ì—°ì‚° ë°˜ì˜ ì—¬ë¶€ ì „í™˜"
+                                    title="Å¬¸¯ ½Ã °¡°è ¿¬»ê ¹İ¿µ ¿©ºÎ ÀüÈ¯"
                                   >
-                                    {item.active ? "ë°˜ì˜" : "ë¯¸ë°˜ì˜"}
+                                    {item.active ? "¹İ¿µ" : "Á¦¿Ü"}
                                   </button>
                                   <div className="min-w-0">
                                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -3239,37 +3316,37 @@ ${question}`;
                                   </div>
                                 </div>
                                 <span className="font-mono text-xs sm:text-sm font-bold text-slate-900 shrink-0">
-                                  {item.amount < 0 ? "+" : "-"}{Math.abs(item.amount).toLocaleString()}ì›
+                                  {item.amount < 0 ? "+" : "-"}{Math.abs(item.amount).toLocaleString()}¿ø
                                 </span>
                               </div>
 
                               <div className="flex items-center gap-2 flex-wrap mt-2">
                                 <input
                                   type="text"
-                                  placeholder="ë©”ëª¨ ì¶”ê°€..."
+                                  placeholder="¸Ş¸ğ Ãß°¡..."
                                   value={item.memo || ""}
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     setLedger(prev => prev.map(x => x.id === item.id ? { ...x, memo: val } : x));
                                   }}
                                   className="flex-1 min-w-[90px] bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate font-sans"
-                                  title="ê°œë³„ ê±°ë˜ ë©”ëª¨ (ìë™ ì €ì¥)"
+                                  title="°³º° °Å·¡ ¸Ş¸ğ (ÀÚµ¿ ÀúÀå)"
                                 />
                                 <input
                                   type="text"
-                                  placeholder="ì§€ì¶œì..."
+                                  placeholder="ÁöÃâÀÚ..."
                                   value={item.spender || ""}
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     setLedger(prev => prev.map(x => x.id === item.id ? { ...x, spender: val } : x));
                                   }}
                                   className="w-20 shrink-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500 truncate font-sans"
-                                  title="ì§€ì¶œì (ì˜ˆ: ì˜ë²”, ì¬ì€)"
+                                  title="ÁöÃâÀÚ (¿¹: ¿µ¹ü, ÀçÀº)"
                                 />
                                 <button
                                   onClick={() => handleDeleteItem(item.id)}
                                   className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
-                                  title="ë‚´ì—­ ì‚­ì œ"
+                                  title="³»¿ª »èÁ¦"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -3287,15 +3364,15 @@ ${question}`;
               {/* DYNAMIC SUM TOTALS BOX */}
               <div className="bg-white rounded-3xl border border-slate-200 shadow-md p-6 space-y-6" id="ledger_totals_box">
                 <h4 className="text-xs font-bold uppercase tracking-widest text-slate-500 border-b border-slate-100 pb-3">
-                  ğŸ“Š {selectedMonth.replace("-", "ë…„ ")}ì›” ìœ íš¨ ê³„ì‚° ë©”íŠ¸ë¦­ (ì‹¤ì‹œê°„ ë¦¬ì•¡í‹°ë¸Œ ê²°ê³¼)
+                  ?? {selectedMonth.replace("-", "³â ")}¿ù À¯È¿ °è»ê ¸ŞÆ®¸¯ (½Ç½Ã°£ ¸®¾×Æ¼ºê °á°ú)
                 </h4>
                 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-between items-center">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">ğŸŸ¢ ì„ íƒ ìˆ˜ì… ì´í•©</span>
+                      <span className="text-[10px] text-slate-500 block">?? ¼±ÅÃ ¼öÀÔ ÃÑÇÕ</span>
                       <strong className="text-lg sm:text-xl font-mono text-emerald-600">
-                        {activeIncomeTotal.toLocaleString()}ì›
+                        {activeIncomeTotal.toLocaleString()}¿ø
                       </strong>
                     </div>
                     <ArrowUpRight className="w-8 h-8 text-emerald-500 opacity-50 shrink-0" />
@@ -3303,9 +3380,9 @@ ${question}`;
 
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-between items-center">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">ğŸ”´ ì„ íƒ ì§€ì¶œ ì´í•©</span>
+                      <span className="text-[10px] text-slate-500 block">?? ¼±ÅÃ ÁöÃâ ÃÑÇÕ</span>
                       <strong className="text-lg sm:text-xl font-mono text-slate-900">
-                        {activeExpenseTotal.toLocaleString()}ì›
+                        {activeExpenseTotal.toLocaleString()}¿ø
                       </strong>
                     </div>
                     <ArrowDownRight className="w-8 h-8 text-rose-500 opacity-50 shrink-0" />
@@ -3317,21 +3394,21 @@ ${question}`;
                       : "bg-rose-50/40 border-rose-200"
                   }`}>
                     <div>
-                      <span className="text-[10px] text-slate-500 block">ğŸ“Š ë‹¹ì›” ìµœì¢… ìˆœìˆ˜ì… (ì‰ì—¬)</span>
+                      <span className="text-[10px] text-slate-500 block">?? ´ç¿ù ÃÖÁ¾ ¼ø¼öÀÔ (À×¿©)</span>
                       <strong className={`text-lg sm:text-xl font-mono ${
                         netMonthlyIncome >= 0 ? "text-emerald-700" : "text-rose-700"
                       }`}>
-                        {netMonthlyIncome.toLocaleString()}ì›
+                        {netMonthlyIncome.toLocaleString()}¿ø
                       </strong>
                     </div>
                     <div className="text-right text-xs">
                       {netMonthlyIncome >= 0 ? (
                         <span className="text-[10px] sm:text-xs text-emerald-700 font-bold bg-emerald-100 px-2.5 py-1 rounded-md block">
-                          í‘ì ì €ì¶•ê°€ëŠ¥
+                          ÈæÀÚ ÀúÃà°¡´É
                         </span>
                       ) : (
                         <span className="text-[10px] sm:text-xs text-rose-700 font-bold bg-rose-100 px-2.5 py-1 rounded-md block">
-                          âš ï¸ ë¹„ìƒ ì˜ˆë¹„ë¹„ ì‚¬ìš©
+                          ?? ºñ»ó ¿¹ºñºñ »ç¿ë
                         </span>
                       )}
                     </div>
@@ -3343,7 +3420,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 2.5: ğŸ“Š ì¬ë¬´ì  ì§€ì¶œ ë¶„ì„ (Financial Expense Analysis)
+              TAB 2.5: ?? Àç¹«Àû ÁöÃâ ºĞ¼® (Financial Expense Analysis)
              ========================================== */}
           {activeTab === "analysis" && (
             <div className="space-y-8" id="financial_expense_analysis_tab">
@@ -3352,16 +3429,16 @@ ${question}`;
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
                   <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                    <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">ğŸ“Š</span>
-                    <span>ì¬ë¬´ì  ì§€ì¶œ ì„¸ë¶€ ë¶„ì„</span>
+                    <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">??</span>
+                    <span>Àç¹«Àû ÁöÃâ ¼¼ºÎ ºĞ¼®</span>
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    ì„ íƒëœ ì›”ì˜ ê°€ê³„ë¶€ ì§€ì¶œ ì •ë³´ë¥¼ ë¶„ì„í•˜ì—¬ ê³ ì •ë¹„ì™€ ë³€ë™ë¹„ì˜ ê· í˜• ìƒíƒœ ë° ë¹„ì¤‘ ìˆœìœ„ë¥¼ ì •ë°€ ì§„ë‹¨í•©ë‹ˆë‹¤.
+                    ¼±ÅÃµÈ ¿ùÀÇ °¡°èºÎ ÁöÃâ Á¤º¸¸¦ ºĞ¼®ÇÏ¿© °íÁ¤ºñ¿Í º¯µ¿ºñÀÇ ±ÕÇü »óÅÂ ¹× ºñÁß ¼øÀ§¸¦ Á¤¹Ğ Áø´ÜÇÕ´Ï´Ù.
                   </p>
                 </div>
 
                 <div className="flex items-center space-x-2 shrink-0">
-                  <span className="text-xs font-bold text-slate-600">ì¡°íšŒ ëŒ€ìƒ ì›”:</span>
+                  <span className="text-xs font-bold text-slate-600">Á¶È¸ ´ë»ó ¿ù:</span>
                   <select
                     value={selectedMonth}
                     onChange={(e) => setSelectedMonth(e.target.value)}
@@ -3369,7 +3446,7 @@ ${question}`;
                     id="analysis_month_select"
                   >
                     {uniqueMonths.map((m) => (
-                      <option key={m} value={m}>{m.replace("-", "ë…„ ")}ì›”</option>
+                      <option key={m} value={m}>{m.replace("-", "³â ")}¿ù</option>
                     ))}
                   </select>
                 </div>
@@ -3381,26 +3458,26 @@ ${question}`;
                 return (
                   <>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                      {/* â‘  ê³ ì •ë¹„ vs ë³€ë™ë¹„ ìë™ ë¶„ë¥˜ ë° ë¹„ì¤‘ ì‚°ì¶œ */}
+                      {/* ¨ç °íÁ¤ºñ vs º¯µ¿ºñ ÀÚµ¿ ºĞ·ù ¹× ºñÁß »êÃâ */}
                       <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm flex flex-col justify-between">
                         <div>
                           <h4 className="font-bold text-slate-900 text-base mb-1 flex items-center gap-1.5">
                             <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
-                            <span>â‘  ê³ ì •ë¹„ vs ë³€ë™ë¹„ ìë™ ë¶„ë¥˜ ë° ë¹„ì¤‘</span>
+                            <span>¨ç °íÁ¤ºñ vs º¯µ¿ºñ ÀÚµ¿ ºĞ·ù ¹× ºñÁß</span>
                           </h4>
                           <p className="text-xs text-slate-400 mb-6 leading-relaxed">
-                            ë§¤ì›” ê³ ì •ì ìœ¼ë¡œ ì²­êµ¬ë˜ëŠ” ê³ ì •ë¹„(ê¸ˆìœµ, ì£¼ê±°, ë³´í—˜ ë“±)ì™€ í†µì œê°€ ê°€ëŠ¥í•œ ë³€ë™ë¹„(ì‹ë¹„, ì‡¼í•‘ ë“±)ì˜ ì¡°í™”ë¡œìš´ ìì‚° ë°°ë¶„ ë¹„ì¤‘ì…ë‹ˆë‹¤.
+                            ¸Å¿ù °íÁ¤ÀûÀ¸·Î Ã»±¸µÇ´Â °íÁ¤ºñ(±İÀ¶, ÁÖ°Å, º¸Çè µî)¿Í ÅëÁ¦°¡ °¡´ÉÇÑ º¯µ¿ºñ(½Äºñ, ¼îÇÎ µî)ÀÇ Á¶È­·Î¿î ÀÚ»ê ¹èºĞ ºñÁßÀÔ´Ï´Ù.
                           </p>
 
                           <div className="grid grid-cols-2 gap-4 mb-6">
                             <div className="bg-blue-50/40 p-4 rounded-2xl border border-blue-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ”’ ê³ ì •ë¹„ í•©ê³„</span>
-                              <strong className="text-base sm:text-lg font-mono text-blue-700 block">{briefing.fixedSum.toLocaleString()}ì›</strong>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? °íÁ¤ºñ ÇÕ°è</span>
+                              <strong className="text-base sm:text-lg font-mono text-blue-700 block">{briefing.fixedSum.toLocaleString()}¿ø</strong>
                               <span className="text-xs font-black text-blue-500 bg-white border border-blue-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.fixedRatio.toFixed(1)}%</span>
                             </div>
                             <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ’¸ ë³€ë™ë¹„ í•©ê³„</span>
-                              <strong className="text-base sm:text-lg font-mono text-amber-700 block">{briefing.variableSum.toLocaleString()}ì›</strong>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? º¯µ¿ºñ ÇÕ°è</span>
+                              <strong className="text-base sm:text-lg font-mono text-amber-700 block">{briefing.variableSum.toLocaleString()}¿ø</strong>
                               <span className="text-xs font-black text-amber-500 bg-white border border-amber-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.variableRatio.toFixed(1)}%</span>
                             </div>
                           </div>
@@ -3410,34 +3487,34 @@ ${question}`;
                           <DonutChart
                             value1={briefing.fixedSum}
                             value2={briefing.variableSum}
-                            label1="ê³ ì •ë¹„"
-                            label2="ë³€ë™ë¹„"
+                            label1="°íÁ¤ºñ"
+                            label2="º¯µ¿ºñ"
                             color1="stroke-blue-600"
                             color2="stroke-amber-500"
                           />
                         </div>
                       </div>
 
-                      {/* â‘¡ ì£¼ìš” ì¹´í…Œê³ ë¦¬ ë¹„ì¤‘ ë¶„ì„ */}
+                      {/* ¨è ÁÖ¿ä Ä«Å×°í¸® ºñÁß ºĞ¼® */}
                       <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm flex flex-col justify-between">
                         <div>
                           <h4 className="font-bold text-slate-900 text-base mb-1 flex items-center gap-1.5">
                             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-                            <span>â‘¡ ì§‘ì¤‘ ê´€ë¦¬ í•­ëª© ë° ì£¼ìš” ì§€ì¶œ Top 5</span>
+                            <span>¨è ÁıÁß °ü¸® Ç×¸ñ ¹× ÁÖ¿ä ÁöÃâ Top 5</span>
                           </h4>
                           <p className="text-xs text-slate-400 mb-6 leading-relaxed">
-                            ì†Œë¹„ ì§€ì¶œì˜ ê°€ì¥ í° ë¹„ì¤‘ì„ ì°¨ì§€í•˜ëŠ” ì‹ë¹„ ë° ë³´í—˜ë£Œì˜ ë‹¹ì›” ì ìœ ìœ¨ê³¼ ê°€ì¥ ë†’ì€ 5ëŒ€ ì§€ì¶œ ë¶„ì•¼ì˜ íŒŒì´ ë¶„ì„ì…ë‹ˆë‹¤.
+                            ¼Òºñ ÁöÃâÀÇ °¡Àå Å« ºñÁßÀ» Â÷ÁöÇÏ´Â ½Äºñ ¹× º¸Çè·áÀÇ ´ç¿ù Á¡À¯À²°ú °¡Àå ³ôÀº 5´ë ÁöÃâ ºĞ¾ßÀÇ ÆÄÀÌ ºĞ¼®ÀÔ´Ï´Ù.
                           </p>
 
                           <div className="grid grid-cols-2 gap-4 mb-6">
                             <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸš ì‹ë¹„ ì ìœ ë¹„</span>
-                              <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{briefing.foodSum.toLocaleString()}ì›</strong>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ½Äºñ Á¡À¯ºñ</span>
+                              <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{briefing.foodSum.toLocaleString()}¿ø</strong>
                               <span className="text-xs font-black text-emerald-600 bg-white border border-emerald-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.foodRatio.toFixed(1)}%</span>
                             </div>
                             <div className="bg-rose-50/40 p-4 rounded-2xl border border-rose-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ›¡ï¸ ë³´í—˜ë£Œ/ê¸ˆìœµ ì ìœ ë¹„</span>
-                              <strong className="text-base sm:text-lg font-mono text-rose-700 block">{briefing.insuranceSum.toLocaleString()}ì›</strong>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">??? º¸Çè·á/±İÀ¶ Á¡À¯ºñ</span>
+                              <strong className="text-base sm:text-lg font-mono text-rose-700 block">{briefing.insuranceSum.toLocaleString()}¿ø</strong>
                               <span className="text-xs font-black text-rose-500 bg-white border border-rose-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.insuranceRatio.toFixed(1)}%</span>
                             </div>
                           </div>
@@ -3449,56 +3526,56 @@ ${question}`;
                       </div>
                     </div>
 
-                    {/* â‘¢ ì¬ë¬´ ë¶„ì„ ìš”ì•½ ë¦¬í¬íŠ¸ */}
+                    {/* ¨é Àç¹« ºĞ¼® ¿ä¾à ¸®Æ÷Æ® */}
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4">
                       <h4 className="font-bold text-slate-900 text-base flex items-center gap-1.5">
-                        <span className="p-1 bg-blue-50 text-blue-600 rounded flex items-center justify-center w-6 h-6">ğŸ’¡</span>
-                        <span>â‘¢ ì¬ë¬´ ë¶„ì„ ìš”ì•½ ë¦¬í¬íŠ¸ (Financial Insights)</span>
+                        <span className="p-1 bg-blue-50 text-blue-600 rounded flex items-center justify-center w-6 h-6">??</span>
+                        <span>¨é Àç¹« ºĞ¼® ¿ä¾à ¸®Æ÷Æ® (Financial Insights)</span>
                       </h4>
                       <p className="text-xs text-slate-400 leading-relaxed">
-                        ì„ íƒëœ ì›”ì˜ ìì‚° ë°°ë¶„ ê²°ê³¼ì™€ ì§€ì¶œ ì²´ì§ˆì— ëŒ€í•˜ì—¬ AI ì§€ì¶œ ì§„ë‹¨ ì—”ì§„ì´ ìë™ ì‚°ì¶œí•œ ì •ëŸ‰ì  ë³´ê³ ì„œì…ë‹ˆë‹¤.
+                        ¼±ÅÃµÈ ¿ùÀÇ ÀÚ»ê ¹èºĞ °á°ú¿Í ÁöÃâ Ã¼Áú¿¡ ´ëÇÏ¿© AI ÁöÃâ Áø´Ü ¿£ÁøÀÌ ÀÚµ¿ »êÃâÇÑ Á¤·®Àû º¸°í¼­ÀÔ´Ï´Ù.
                       </p>
                       
                       <div className="bg-blue-50/50 border-l-4 border-blue-500 p-5 rounded-r-2xl shadow-xs">
-                        <span className="font-bold text-blue-800 text-sm block mb-2">ë‹¹ì›” ì •ë°€ ì¬ì • ì œì–¸</span>
+                        <span className="font-bold text-blue-800 text-sm block mb-2">´ç¿ù Á¤¹Ğ ÀçÁ¤ Á¦¾ğ</span>
                         <p className="text-slate-700 text-xs sm:text-sm leading-relaxed font-medium">
                           {briefing.summaryText.replace(/\*\*/g, "")}
                         </p>
                       </div>
                     </div>
 
-                    {/* â‘£ ì¹´í…Œê³ ë¦¬ë³„ ìƒì„¸ ì§€ì¶œ ë“œë¦´ë‹¤ìš´ */}
+                    {/* ¨ê Ä«Å×°í¸®º° »ó¼¼ ÁöÃâ µå¸±´Ù¿î */}
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-5" id="expense_category_drilldown">
                       <div>
                         <h4 className="font-bold text-slate-900 text-base flex items-center gap-1.5">
-                          <span className="p-1 bg-emerald-50 text-emerald-600 rounded flex items-center justify-center w-6 h-6">ğŸ”</span>
-                          <span>â‘£ ì¹´í…Œê³ ë¦¬ë³„ ìƒì„¸ ì§€ì¶œ ë“œë¦´ë‹¤ìš´</span>
+                          <span className="p-1 bg-emerald-50 text-emerald-600 rounded flex items-center justify-center w-6 h-6">??</span>
+                          <span>¨ê Ä«Å×°í¸®º° »ó¼¼ ÁöÃâ µå¸±´Ù¿î</span>
                         </h4>
                         <p className="text-xs text-slate-400 mt-1">
-                          ê¶ê¸ˆí•œ ì§€ì¶œ ì¹´í…Œê³ ë¦¬ë¥¼ ì„ íƒí•˜ë©´ í•´ë‹¹ ì¹´í…Œê³ ë¦¬ì˜ ì§€ì¶œ ê·œëª¨ì™€ ë¹„ì¤‘, ì„¸ë¶€ ê±°ë˜ ë‚´ì—­ì„ ë°”ë¡œ í™•ì¸í•  ìˆ˜ ìˆìŠµë‹ˆë‹¤.
+                          ±Ã±İÇÑ ÁöÃâ Ä«Å×°í¸®¸¦ ¼±ÅÃÇÏ¸é ÇØ´ç Ä«Å×°í¸®ÀÇ ÁöÃâ ±Ô¸ğ¿Í ºñÁß, ¼¼ºÎ °Å·¡ ³»¿ªÀ» ¹Ù·Î È®ÀÎÇÒ ¼ö ÀÖ½À´Ï´Ù.
                         </p>
                       </div>
 
                       {(() => {
-                        const monthExpenses = ledger.filter(item => item.month === selectedMonth && item.type === "ì§€ì¶œ" && item.active);
+                        const monthExpenses = ledger.filter(item => item.month === selectedMonth && item.type === "ÁöÃâ" && item.active);
                         const totalExpenseForMonth = monthExpenses.reduce((sum, item) => sum + item.amount, 0);
                         const categories = Array.from(new Set(monthExpenses.map(item => item.category))).sort();
-                        const selectedCat = drilldownCategory === "ì „ì²´" || categories.includes(drilldownCategory) ? drilldownCategory : "ì „ì²´";
-                        const filteredItems = selectedCat === "ì „ì²´" ? monthExpenses : monthExpenses.filter(item => item.category === selectedCat);
+                        const selectedCat = drilldownCategory === "ÀüÃ¼" || categories.includes(drilldownCategory) ? drilldownCategory : "ÀüÃ¼";
+                        const filteredItems = selectedCat === "ÀüÃ¼" ? monthExpenses : monthExpenses.filter(item => item.category === selectedCat);
                         const filteredTotal = filteredItems.reduce((sum, item) => sum + item.amount, 0);
                         const filteredRatio = totalExpenseForMonth > 0 ? (filteredTotal / totalExpenseForMonth) * 100 : 0;
 
                         return (
                           <>
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-bold text-slate-600">ì¹´í…Œê³ ë¦¬ ì„ íƒ:</span>
+                              <span className="text-xs font-bold text-slate-600">Ä«Å×°í¸® ¼±ÅÃ:</span>
                               <select
                                 value={selectedCat}
                                 onChange={(e) => setDrilldownCategory(e.target.value)}
                                 className="bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-1.5 text-xs sm:text-sm font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-800 shadow-xs"
                                 id="drilldown_category_select"
                               >
-                                <option value="ì „ì²´">ì „ì²´</option>
+                                <option value="ÀüÃ¼">ÀüÃ¼</option>
                                 {categories.map(c => (
                                   <option key={c} value={c}>{c}</option>
                                 ))}
@@ -3507,20 +3584,20 @@ ${question}`;
 
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                               <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ’° ì´ ì§€ì¶œ ê¸ˆì•¡</span>
-                                <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{filteredTotal.toLocaleString()}ì›</strong>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ÃÑ ÁöÃâ ±İ¾×</span>
+                                <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{filteredTotal.toLocaleString()}¿ø</strong>
                               </div>
                               <div className="bg-blue-50/40 p-4 rounded-2xl border border-blue-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ§¾ ê±´ìˆ˜</span>
-                                <strong className="text-base sm:text-lg font-mono text-blue-700 block">{filteredItems.length}ê±´</strong>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? °Ç¼ö</span>
+                                <strong className="text-base sm:text-lg font-mono text-blue-700 block">{filteredItems.length}°Ç</strong>
                               </div>
                               <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ“Š ì „ì²´ ì§€ì¶œ ëŒ€ë¹„ ë¹„ì¤‘</span>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ÀüÃ¼ ÁöÃâ ´ëºñ ºñÁß</span>
                                 <strong className="text-base sm:text-lg font-mono text-amber-700 block">{filteredRatio.toFixed(1)}%</strong>
                               </div>
                             </div>
 
-                            {selectedCat !== "ì „ì²´" && (() => {
+                            {selectedCat !== "ÀüÃ¼" && (() => {
                               const monthToIdx = (m: string) => {
                                 const [y, mo] = m.split("-").map(Number);
                                 return y * 12 + (mo - 1);
@@ -3535,22 +3612,22 @@ ${question}`;
 
                               const monthlyTotals = last6Months.map(m => ({
                                 month: m,
-                                total: ledger.filter(item => item.month === m && item.category === selectedCat && item.type === "ì§€ì¶œ" && item.active).reduce((sum, item) => sum + item.amount, 0)
+                                total: ledger.filter(item => item.month === m && item.category === selectedCat && item.type === "ÁöÃâ" && item.active).reduce((sum, item) => sum + item.amount, 0)
                               }));
 
                               const maxTotal = Math.max(...monthlyTotals.map(x => x.total), 1);
 
                               return (
                                 <div className="space-y-3" id="drilldown_category_trend">
-                                  <h5 className="text-xs font-bold text-slate-600">ğŸ“ˆ "{selectedCat}" ì¹´í…Œê³ ë¦¬ ìµœê·¼ 6ê°œì›” ì§€ì¶œ ì¶”ì´</h5>
+                                  <h5 className="text-xs font-bold text-slate-600">?? "{selectedCat}" Ä«Å×°í¸® ÃÖ±Ù 6°³¿ù ÁöÃâ ÃßÀÌ</h5>
                                   <div className="overflow-x-auto">
                                     <table className="w-full min-w-[480px] text-xs sm:text-sm">
                                       <thead>
                                         <tr className="border-b border-slate-200 text-slate-500 text-left">
-                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">ì›”</th>
-                                          <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ì§€ì¶œì•¡</th>
-                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">ì „ì›” ëŒ€ë¹„</th>
-                                          <th className="py-2 pr-3 font-bold w-1/2">ê·œëª¨</th>
+                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">¿ù</th>
+                                          <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ÁöÃâ¾×</th>
+                                          <th className="py-2 pr-3 font-bold whitespace-nowrap">Àü¿ù ´ëºñ</th>
+                                          <th className="py-2 pr-3 font-bold w-1/2">±Ô¸ğ</th>
                                         </tr>
                                       </thead>
                                       <tbody>
@@ -3562,17 +3639,17 @@ ${question}`;
                                           return (
                                             <tr key={mt.month} className={`border-b border-slate-100 ${isCurrent ? "bg-emerald-50/40" : ""}`}>
                                               <td className={`py-2 pr-3 font-bold whitespace-nowrap ${isCurrent ? "text-emerald-700" : "text-slate-700"}`}>
-                                                {mt.month}{isCurrent ? " (ì„ íƒ)" : ""}
+                                                {mt.month}{isCurrent ? " (¼±ÅÃ)" : ""}
                                               </td>
-                                              <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{mt.total.toLocaleString()}ì›</td>
+                                              <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{mt.total.toLocaleString()}¿ø</td>
                                               <td className="py-2 pr-3 whitespace-nowrap">
                                                 {delta === null ? (
                                                   <span className="text-slate-400">-</span>
                                                 ) : delta === 0 ? (
-                                                  <span className="text-slate-400">ë³€ë™ì—†ìŒ</span>
+                                                  <span className="text-slate-400">º¯µ¿¾øÀ½</span>
                                                 ) : (
                                                   <span className={`font-bold ${delta > 0 ? "text-rose-600" : "text-emerald-600"}`}>
-                                                    {delta > 0 ? "â–²" : "â–¼"} {Math.abs(delta).toLocaleString()}ì›
+                                                    {delta > 0 ? "¡ã" : "¡å"} {Math.abs(delta).toLocaleString()}¿ø
                                                   </span>
                                                 )}
                                               </td>
@@ -3595,17 +3672,17 @@ ${question}`;
                               <table className="w-full min-w-[640px] text-xs sm:text-sm" id="drilldown_detail_table">
                                 <thead>
                                   <tr className="border-b border-slate-200 text-slate-500 text-left">
-                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">ë‚ ì§œ</th>
-                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">ì¹´í…Œê³ ë¦¬</th>
-                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">ë‚´ìš©</th>
-                                    <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ê¸ˆì•¡</th>
-                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">ê²°ì œìˆ˜ë‹¨</th>
-                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">ë©”ëª¨</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">³¯Â¥</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">Ä«Å×°í¸®</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">³»¿ë</th>
+                                    <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">±İ¾×</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">°áÁ¦¼ö´Ü</th>
+                                    <th className="py-2 pr-3 font-bold whitespace-nowrap">¸Ş¸ğ</th>
                                   </tr>
                                 </thead>
                                 <tbody>
                                   {filteredItems.length === 0 ? (
-                                    <tr><td colSpan={6} className="text-center py-8 text-slate-400">í•´ë‹¹ ì¡°ê±´ì˜ ì§€ì¶œ ë‚´ì—­ì´ ì—†ìŠµë‹ˆë‹¤.</td></tr>
+                                    <tr><td colSpan={6} className="text-center py-8 text-slate-400">ÇØ´ç Á¶°ÇÀÇ ÁöÃâ ³»¿ªÀÌ ¾ø½À´Ï´Ù.</td></tr>
                                   ) : (
                                     filteredItems.map((item, itemIdx) => (
                                       <tr key={`${item.id}-${itemIdx}`} className="border-b border-slate-100">
@@ -3614,7 +3691,7 @@ ${question}`;
                                           <span className="bg-rose-50 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-md">{item.category}</span>
                                         </td>
                                         <td className="py-2 pr-3 font-semibold text-slate-800 whitespace-nowrap">{item.content}</td>
-                                        <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{item.amount.toLocaleString()}ì›</td>
+                                        <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{item.amount.toLocaleString()}¿ø</td>
                                         <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{item.paymentMethod || "-"}</td>
                                         <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{item.memo || "-"}</td>
                                       </tr>
@@ -3635,18 +3712,18 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 3: ğŸ“ˆ ìì‚° ë° ë¶€ì±„ (Asset & Trend Analysis)
+              TAB 3: ?? ÀÚ»ê ¹× ºÎÃ¤ (Asset & Trend Analysis)
              ========================================== */}
           {activeTab === "assets" && (
             <div className="space-y-8" id="analysis_tab">
               
-              {/* Calculating dynamic assets for trend (3ë²ˆ) */}
+              {/* Calculating dynamic assets for trend (3¹ø) */}
               {(() => {
-                const anchorMonth = uniqueMonths.length > 0 ? uniqueMonths[uniqueMonths.length - 1] : selectedMonth;
+                const anchorMonth = selectedAssetMonth || latestAssetMonth || (uniqueMonths.length > 0 ? uniqueMonths[uniqueMonths.length - 1] : selectedMonth);
 
                 const getMonthNet = (m: string) => {
-                  const inc = ledger.filter(item => item.month === m && item.type === "ìˆ˜ì…" && item.active).reduce((sum, item) => sum + item.amount, 0);
-                  const exp = ledger.filter(item => item.month === m && item.type === "ì§€ì¶œ" && item.active).reduce((sum, item) => sum + item.amount, 0);
+                  const inc = ledger.filter(item => item.month === m && item.type === "¼öÀÔ" && item.active).reduce((sum, item) => sum + item.amount, 0);
+                  const exp = ledger.filter(item => item.month === m && item.type === "ÁöÃâ" && item.active).reduce((sum, item) => sum + item.amount, 0);
                   return inc - exp;
                 };
 
@@ -3660,8 +3737,8 @@ ${question}`;
                   return `${y}-${String(mo).padStart(2, "0")}`;
                 };
 
-                // ì›ì¥ì— ê¸°ë¡ëœ ê°€ì¥ ìµœê·¼ ì›”(anchorMonth)ì˜ ì‹¤ì‹œê°„ ìì‚°(totalAssets)ì„ ê¸°ì¤€ìœ¼ë¡œ,
-                // ê° ì›”ì˜ ì‹¤ì§ˆ ìˆ˜ì§€(ìˆ˜ì…-ì§€ì¶œ)ë¥¼ ëˆ„ì  ê°€ê°í•˜ì—¬ í•´ë‹¹ ì›”ì˜ ì¶”ì • ìì‚°ì„ ê³„ì‚°í•œë‹¤.
+                // ¿øÀå¿¡ ±â·ÏµÈ °¡Àå ÃÖ±Ù ¿ù(anchorMonth)ÀÇ ½Ç½Ã°£ ÀÚ»ê(totalAssets)À» ±âÁØÀ¸·Î,
+                // °¢ ¿ùÀÇ ½ÇÁú ¼öÁö(¼öÀÔ-ÁöÃâ)¸¦ ´©Àû °¡°¨ÇÏ¿© ÇØ´ç ¿ùÀÇ ÃßÁ¤ ÀÚ»êÀ» °è»êÇÑ´Ù.
                 const estimateAssetsForMonth = (targetMonth: string) => {
                   const anchorIdx = monthToIdx(anchorMonth);
                   const targetIdx = monthToIdx(targetMonth);
@@ -3675,8 +3752,9 @@ ${question}`;
                   return val;
                 };
 
-                const compareList = assetCompareMonths.length > 0 ? assetCompareMonths : (uniqueMonths.length > 0 ? uniqueMonths.slice(-3) : [anchorMonth]);
-                const points = compareList.map(m => ({ month: m, value: estimateAssetsForMonth(m) }));
+                const assetMonthSource = assetMonths.length > 0 ? assetMonths : uniqueMonths;
+                const compareList = assetCompareMonths.length > 0 ? assetCompareMonths : (assetMonthSource.length > 0 ? assetMonthSource.slice(-3) : [anchorMonth]);
+                const points = compareList.map(m => ({ month: m, value: assetSnapshots[m] ? assetSnapshotTotal(assetSnapshots[m]) : estimateAssetsForMonth(m) }));
 
                 const maxVal = Math.max(...points.map(p => p.value), 1);
                 const minVal = Math.min(...points.map(p => p.value), 0);
@@ -3699,20 +3777,20 @@ ${question}`;
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 border-b border-white/10 pb-6">
                       <div className="space-y-1">
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest inline-block">
-                          Assets & Wealth Status ğŸ’°
+                          Assets & Wealth Status ??
                         </span>
                         <h3 className="text-xl sm:text-2xl font-black text-white">
-                          ìš°ë¦¬ì§‘ í˜„ì¬ í†µí•© ê¸ˆìœµ ìì‚° ë° ë³€ë™ ì¶”ì´
+                          ¿ì¸®Áı ÇöÀç ÅëÇÕ ±İÀ¶ ÀÚ»ê ¹× º¯µ¿ ÃßÀÌ
                         </h3>
                         <p className="text-xs text-slate-400">
-                          ê°€ê³„ë¶€ì˜ ìˆ˜ì§€ íƒ€ì‚°ê³¼ ì‹¤ì‹œê°„ ì—°ë™ë˜ì–´ ìš´ìš©ë˜ëŠ” í†µí•© ìˆœìì‚° í˜„í™©íŒì…ë‹ˆë‹¤.
+                          °¡°èºÎÀÇ ¼öÁö Å¸»ê°ú ½Ç½Ã°£ ¿¬µ¿µÇ¾î ¿î¿ëµÇ´Â ÅëÇÕ ¼øÀÚ»ê ÇöÈ²ÆÇÀÔ´Ï´Ù.
                         </p>
                       </div>
                       
                       <div className="text-left md:text-right">
-                        <span className="text-xs text-slate-400 block font-bold uppercase tracking-wider">ìš°ë¦¬ì§‘ ì‹¤ì‹œê°„ ì´ ê¸ˆìœµìì‚°</span>
+                        <span className="text-xs text-slate-400 block font-bold uppercase tracking-wider">¿ì¸®Áı ½Ç½Ã°£ ÃÑ ±İÀ¶ÀÚ»ê</span>
                         <strong className="text-3xl sm:text-4xl font-mono text-emerald-400 font-black tracking-tight block mt-1">
-                          {totalAssets.toLocaleString()}ì›
+                          {totalAssets.toLocaleString()}¿ø
                         </strong>
                       </div>
                     </div>
@@ -3720,19 +3798,19 @@ ${question}`;
                     {/* Sub-asset grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4" id="sub_assets_metrics_grid">
                       
-                      {/* Card 1: ììœ ì…ì¶œê¸ˆ ìì‚° */}
+                      {/* Card 1: ÀÚÀ¯ÀÔÃâ±İ ÀÚ»ê */}
                       <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
                         <div>
                           <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">ğŸ’µ ììœ ì…ì¶œê¸ˆ ìì‚°</span>
+                            <span className="text-[10px] text-slate-400 font-bold">?? ÀÚÀ¯ÀÔÃâ±İ ÀÚ»ê</span>
                             <button
                               onClick={() => toggleAssetExpand("free")}
                               className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
                             >
-                              {expandedAssets.free ? "ìˆ¨ê¸°ê¸° â–²" : "ì„¸ë¶€ ë³´ê¸° â–¼"}
+                              {expandedAssets.free ? "¼û±â±â ¡ã" : "¼¼ºÎ º¸±â ¡å"}
                             </button>
                           </div>
-                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}ì›</strong>
+                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}¿ø</strong>
                         </div>
                         {expandedAssets.free && (
                           <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
@@ -3743,13 +3821,13 @@ ${question}`;
                               <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
                                 <div className="flex justify-between items-center gap-2">
                                   <span className="truncate max-w-[130px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                  <span className="shrink-0">{acc.amount.toLocaleString()}ì›</span>
+                                  <span className="shrink-0">{acc.amount.toLocaleString()}¿ø</span>
                                 </div>
                                 <select
                                   value={parseAssetOwner(acc.name)}
                                   onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
                                   className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                  title="ê³„ì¢Œ ëª…ì˜ ì§€ì •"
+                                  title="°èÁÂ ¸íÀÇ ÁöÁ¤"
                                 >
                                   {ASSET_OWNER_OPTIONS.map(o => (
                                     <option key={o} value={o} className="text-slate-900">{o}</option>
@@ -3761,19 +3839,19 @@ ${question}`;
                         )}
                       </div>
 
-                      {/* Card 2: ì£¼ì‹ ë° íˆ¬ììì‚° */}
+                      {/* Card 2: ÁÖ½Ä ¹× ÅõÀÚÀÚ»ê */}
                       <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
                         <div>
                           <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">ğŸ“ˆ ì£¼ì‹ ë° íˆ¬ììì‚°</span>
+                            <span className="text-[10px] text-slate-400 font-bold">?? ÁÖ½Ä ¹× ÅõÀÚÀÚ»ê</span>
                             <button
                               onClick={() => toggleAssetExpand("investment")}
                               className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
                             >
-                              {expandedAssets.investment ? "ìˆ¨ê¸°ê¸° â–²" : "ì„¸ë¶€ ë³´ê¸° â–¼"}
+                              {expandedAssets.investment ? "¼û±â±â ¡ã" : "¼¼ºÎ º¸±â ¡å"}
                             </button>
                           </div>
-                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}ì›</strong>
+                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}¿ø</strong>
                         </div>
                         {expandedAssets.investment && (
                           <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
@@ -3787,7 +3865,7 @@ ${question}`;
                                   <div className="flex justify-between items-center gap-2">
                                     <span className="truncate max-w-[110px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
                                     <div className="text-right shrink-0">
-                                      <span>{acc.appraised.toLocaleString()}ì›</span>
+                                      <span>{acc.appraised.toLocaleString()}¿ø</span>
                                       {isStock && (
                                         <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
                                           ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
@@ -3799,7 +3877,7 @@ ${question}`;
                                     value={parseAssetOwner(acc.name)}
                                     onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
                                     className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                    title="ê³„ì¢Œ ëª…ì˜ ì§€ì •"
+                                    title="°èÁÂ ¸íÀÇ ÁöÁ¤"
                                   >
                                     {ASSET_OWNER_OPTIONS.map(o => (
                                       <option key={o} value={o} className="text-slate-900">{o}</option>
@@ -3817,39 +3895,53 @@ ${question}`;
                     {/* Net Worth Alert Block */}
                     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 text-xs">
                       <div>
-                        <span className="text-slate-400 font-bold block">ğŸ  ì´ ë¶€ì±„ ì°¨ê° í›„ ìˆœê¸ˆìœµìì‚°</span>
+                        <span className="text-slate-400 font-bold block">?? ÃÑ ºÎÃ¤ Â÷°¨ ÈÄ ¼ø±İÀ¶ÀÚ»ê</span>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          NHë†í˜‘ì€í–‰ ì£¼íƒë‹´ë³´ëŒ€ì¶œ ì´ì ë° ì›ê¸ˆ ({totalLiabilities.toLocaleString()}ì›)ì„ ì œì™¸í•œ ìˆœìˆ˜í•œ ê¸ˆìœµ ìì‚°ê°€ì¹˜ì…ë‹ˆë‹¤.
+                          NH³óÇùÀºÇà ÁÖÅÃ´ãº¸´ëÃâ ÀÌÀÚ ¹× ¿ø±İ ({totalLiabilities.toLocaleString()}¿ø)À» Á¦¿ÜÇÑ ¼ø¼öÇÑ ±İÀ¶ ÀÚ»ê°¡Ä¡ÀÔ´Ï´Ù.
                         </p>
                       </div>
                       <div className="text-right">
                         <span className="font-mono text-sm sm:text-base font-extrabold text-indigo-300">
-                          {netWorth.toLocaleString()}ì›
+                          {netWorth.toLocaleString()}¿ø
                         </span>
                       </div>
                     </div>
 
-                    {/* Comparison Month Picker & Trend Chart (3ë²ˆ: ë¹„êµ ì›”ì„ ì§ì ‘ ì„ íƒ) */}
+                    {/* Comparison Month Picker & Trend Chart (3¹ø: ºñ±³ ¿ùÀ» Á÷Á¢ ¼±ÅÃ) */}
                     <div className="space-y-4 pt-4 border-t border-white/5">
-                      <div>
-                        <h4 className="text-sm sm:text-base font-bold text-white flex items-center space-x-2">
-                          <span className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></span>
-                          <span>ğŸ“ˆ ì›”ë³„ ì´ ê¸ˆìœµìì‚° ë³€ë™ ë¹„êµ</span>
-                        </h4>
-                        <p className="text-xs text-slate-400 mt-1">
-                          ë¹„êµí•˜ê³  ì‹¶ì€ ì›”ë“¤ì„ ììœ ë¡­ê²Œ ì„ íƒí•˜ì„¸ìš”. {anchorMonth.replace("-", "ë…„ ")}ì›” ì‹¤ì‹œê°„ ìì‚°ì„ ê¸°ì¤€ìœ¼ë¡œ, ì›ì¥ì— ê¸°ë¡ ë° í™œì„±í™”ëœ ì›”ë³„ ì‹¤ì§ˆ ìˆ˜ì§€ë¥¼ ëˆ„ì  ë°˜ì˜í•´ ì¶”ì •í•©ë‹ˆë‹¤.
-                        </p>
+                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                        <div>
+                          <h4 className="text-sm sm:text-base font-bold text-white flex items-center space-x-2">
+                            <span className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></span>
+                            <span>?? ¿ùº° ÃÑ ±İÀ¶ÀÚ»ê º¯µ¿ ºñ±³</span>
+                          </h4>
+                          <p className="text-xs text-slate-400 mt-1">
+                            ¾÷·ÎµåµÈ ¿ùº° ÀÚ»ê snapshotÀ» °¢°¢ µ¶¸³ÀûÀ¸·Î ºñ±³ÇÕ´Ï´Ù.
+                          </p>
+                        </div>
+                        {assetMonths.length > 0 && (
+                          <select
+                            value={selectedAssetMonth || latestAssetMonth}
+                            onChange={(e) => handleSelectAssetMonth(e.target.value)}
+                            className="w-full sm:w-auto bg-slate-950/70 border border-emerald-400/30 text-emerald-200 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-emerald-400/40 cursor-pointer"
+                            title="Á¶È¸ ¿ù ¼±ÅÃ"
+                          >
+                            {[...assetMonths].reverse().map(m => (
+                              <option key={m} value={m} className="bg-slate-950 text-emerald-100">{formatMonthLabel(m)}</option>
+                            ))}
+                          </select>
+                        )}
                       </div>
 
-                      {uniqueMonths.length === 0 ? (
+                      {assetMonthSource.length === 0 ? (
                         <div className="text-xs text-slate-400 bg-white/5 rounded-xl p-4 text-center">
-                          ê°€ê³„ë¶€ ë°ì´í„°ê°€ ì—†ì–´ ë¹„êµí•  ì›”ì´ ì—†ìŠµë‹ˆë‹¤. ì§€ì¶œê³¼ ìˆ˜ì… íƒ­ì—ì„œ ë‚´ì—­ì„ ì¶”ê°€í•´ ì£¼ì„¸ìš”.
+                          ÀÚ»ê snapshotÀÌ ¾ø¾î ºñ±³ÇÒ ¿ùÀÌ ¾ø½À´Ï´Ù. ÀÚ»ê ÇöÈ² ¿¢¼¿À» ¾÷·ÎµåÇØ ÁÖ¼¼¿ä.
                         </div>
                       ) : (
                         <>
                           {/* Month toggle pills */}
                           <div className="flex flex-wrap gap-2" id="asset_compare_month_toggles">
-                            {uniqueMonths.map(m => (
+                            {assetMonthSource.map(m => (
                               <button
                                 key={m}
                                 onClick={() => toggleAssetCompareMonth(m)}
@@ -3859,12 +3951,12 @@ ${question}`;
                                     : "bg-white/5 border-white/10 text-slate-400 hover:bg-white/10"
                                 }`}
                               >
-                                {m.replace("-", "ë…„ ")}ì›”
+                                {m.replace("-", "³â ")}¿ù
                               </button>
                             ))}
                           </div>
 
-                          {/* Per-month snapshot cards (ì°Œê·¸ëŸ¬ì§ ë°©ì§€: ì¹´ë“œë§ˆë‹¤ ë…ë¦½ëœ ê·¸ë¦¬ë“œ ì…€ í™•ë³´) */}
+                          {/* Per-month snapshot cards (Âî±×·¯Áü ¹æÁö: Ä«µå¸¶´Ù µ¶¸³µÈ ±×¸®µå ¼¿ È®º¸) */}
                           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }} id="asset_compare_cards">
                             {points.map((p, i) => {
                               const prev = i > 0 ? points[i - 1].value : null;
@@ -3872,12 +3964,12 @@ ${question}`;
                               return (
                                 <div key={p.month} className={`rounded-2xl p-4 border ${p.month === anchorMonth ? "bg-emerald-500/10 border-emerald-400/30" : "bg-white/5 border-white/10"}`}>
                                   <span className="text-[10px] text-slate-400 font-bold block">
-                                    {p.month.replace("-", "ë…„ ")}ì›”{p.month === anchorMonth ? " (ê¸°ì¤€)" : ""}
+                                    {p.month.replace("-", "³â ")}¿ù{p.month === anchorMonth ? " (±âÁØ)" : ""}
                                   </span>
-                                  <strong className="text-sm sm:text-base font-mono text-white block mt-1">{Math.round(p.value).toLocaleString()}ì›</strong>
+                                  <strong className="text-sm sm:text-base font-mono text-white block mt-1">{Math.round(p.value).toLocaleString()}¿ø</strong>
                                   {delta !== null && (
                                     <span className={`text-[11px] font-bold font-mono ${delta >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                      {delta >= 0 ? "â–²" : "â–¼"} {Math.abs(Math.round(delta)).toLocaleString()}ì›
+                                      {delta >= 0 ? "¡ã" : "¡å"} {Math.abs(Math.round(delta)).toLocaleString()}¿ø
                                     </span>
                                   )}
                                 </div>
@@ -3885,7 +3977,7 @@ ${question}`;
                             })}
                           </div>
 
-                          {/* SVG Chart Stage: ì›” ê°œìˆ˜ì— ë§ì¶° ê°€ë¡œ í­ì´ ëŠ˜ì–´ë‚˜ê³ , ë¹„ìœ¨ ì™œê³¡ ì—†ì´(preserveAspectRatio) ë Œë”ë§ë˜ì–´ ì°Œê·¸ëŸ¬ì§ ì—†ì´ í‘œì‹œë¨ */}
+                          {/* SVG Chart Stage: ¿ù °³¼ö¿¡ ¸ÂÃç °¡·Î ÆøÀÌ ´Ã¾î³ª°í, ºñÀ² ¿Ö°î ¾øÀÌ(preserveAspectRatio) ·»´õ¸µµÇ¾î Âî±×·¯Áü ¾øÀÌ Ç¥½ÃµÊ */}
                           <div className="bg-slate-950/60 rounded-2xl border border-white/10 p-4 relative overflow-x-auto">
                             <div style={{ minWidth: `${chartWidth}px` }} className="h-56 relative mx-auto">
                               <svg className="w-full h-full" viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet">
@@ -3934,10 +4026,10 @@ ${question}`;
                                       className={p.month === anchorMonth ? "animate-pulse" : ""}
                                     />
                                     <text x={getX(i)} y={getY(p.value) - 16} className="text-[11px] fill-emerald-300 font-mono font-bold" textAnchor="middle">
-                                      {Math.round(p.value).toLocaleString()}ì›
+                                      {Math.round(p.value).toLocaleString()}¿ø
                                     </text>
                                     <text x={getX(i)} y={plotBottom + 24} className="text-[11px] fill-slate-300 font-bold" textAnchor="middle">
-                                      {p.month.replace("-", "ë…„ ")}ì›”{p.month === anchorMonth ? " (ê¸°ì¤€)" : ""}
+                                      {p.month.replace("-", "³â ")}¿ù{p.month === anchorMonth ? " (±âÁØ)" : ""}
                                     </text>
                                   </g>
                                 ))}
@@ -3948,7 +4040,7 @@ ${question}`;
                       )}
 
                       <div className="text-[11px] text-slate-400 text-center font-bold bg-white/5 py-2.5 rounded-xl border border-white/5">
-                        ğŸ’¡ <span className="text-emerald-300 font-extrabold">ì‹¤ì‹œê°„ í”¼ë“œë°±:</span> ê°€ê³„ë¶€ íƒ­ì—ì„œ ê° í–‰ì˜ í™œì„±/ë¹„í™œì„± ìƒíƒœë¥¼ ë³€ê²½í•˜ë©´, ì„ íƒí•œ ì›”ë“¤ì˜ ìì‚° ì¶”ì •ì¹˜ê°€ ì¦‰ì‹œ ë‹¤ì‹œ ê³„ì‚°ë©ë‹ˆë‹¤!
+                        ?? <span className="text-emerald-300 font-extrabold">½Ç½Ã°£ ÇÇµå¹é:</span> °¡°èºÎ ÅÇ¿¡¼­ °¢ ÇàÀÇ È°¼º/ºñÈ°¼º »óÅÂ¸¦ º¯°æÇÏ¸é, ¼±ÅÃÇÑ ¿ùµéÀÇ ÀÚ»ê ÃßÁ¤Ä¡°¡ Áï½Ã ´Ù½Ã °è»êµË´Ï´Ù!
                       </div>
                     </div>
                   </div>
@@ -3963,9 +4055,9 @@ ${question}`;
                   <div>
                     <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                       <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>ğŸ© ì˜ˆì ê¸ˆÂ·í˜„ê¸ˆì„± vs íˆ¬ìì„± ìì‚° ë¹„ìœ¨</span>
+                      <span>?? ¿¹Àû±İ¡¤Çö±İ¼º vs ÅõÀÚ¼º ÀÚ»ê ºñÀ²</span>
                     </h4>
-                    <p className="text-xs text-slate-400">ìš°ë¦¬ ê°€ê³„ì˜ ê¸ˆìœµ í¬íŠ¸í´ë¦¬ì˜¤ ì•ˆì „ì„± í˜„í™©</p>
+                    <p className="text-xs text-slate-400">¿ì¸® °¡°èÀÇ ±İÀ¶ Æ÷Æ®Æú¸®¿À ¾ÈÀü¼º ÇöÈ²</p>
                   </div>
 
                   {/* Interactive Custom SVG Pie Chart */}
@@ -4011,7 +4103,7 @@ ${question}`;
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                         <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Asset Ratio</span>
                         <strong className="text-base font-black text-slate-900 font-mono">{investPercent}%</strong>
-                        <span className="text-[9px] text-orange-500 font-bold">íˆ¬ì ìì‚°ìœ¨</span>
+                        <span className="text-[9px] text-orange-500 font-bold">ÅõÀÚ ÀÚ»êÀ²</span>
                       </div>
                     </div>
 
@@ -4020,9 +4112,9 @@ ${question}`;
                       <div className="flex items-start space-x-2">
                         <span className="w-3.5 h-3.5 bg-emerald-500 rounded mt-0.5 shrink-0"></span>
                         <div>
-                          <p className="font-bold text-slate-800">ì˜ˆì ê¸ˆ ë° í˜„ê¸ˆì„± ìì‚°</p>
+                          <p className="font-bold text-slate-800">¿¹Àû±İ ¹× Çö±İ¼º ÀÚ»ê</p>
                           <span className="font-mono text-slate-500 text-xs block">
-                            {(totalFree + totalSavings + totalElectronic).toLocaleString()}ì› ({cashPercent}%)
+                            {(totalFree + totalSavings + totalElectronic).toLocaleString()}¿ø ({cashPercent}%)
                           </span>
                         </div>
                       </div>
@@ -4030,9 +4122,9 @@ ${question}`;
                       <div className="flex items-start space-x-2">
                         <span className="w-3.5 h-3.5 bg-orange-500 rounded mt-0.5 shrink-0"></span>
                         <div>
-                          <p className="font-bold text-slate-800">íˆ¬ìì„± ìì‚° (ì£¼ì‹/CMA)</p>
+                          <p className="font-bold text-slate-800">ÅõÀÚ¼º ÀÚ»ê (ÁÖ½Ä/CMA)</p>
                           <span className="font-mono text-slate-500 text-xs block">
-                            {totalInvestment.toLocaleString()}ì› ({investPercent}%)
+                            {totalInvestment.toLocaleString()}¿ø ({investPercent}%)
                           </span>
                         </div>
                       </div>
@@ -4046,15 +4138,15 @@ ${question}`;
                   <div>
                     <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                       <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>ğŸ“Š ì£¼ìš” ì£¼ì‹ ì¢…ëª© í‰ê°€ (íˆ¬ì ì›ê¸ˆ ëŒ€ë¹„ ìˆ˜ìµ í˜„í™©)</span>
+                      <span>?? ÁÖ¿ä ÁÖ½Ä Á¾¸ñ Æò°¡ (ÅõÀÚ ¿ø±İ ´ëºñ ¼öÀÍ ÇöÈ²)</span>
                     </h4>
-                    <p className="text-xs text-slate-400">ë“±ë¡ëœ íˆ¬ì ìì‚° ì¢…ëª©ë³„ ì›ê¸ˆ ëŒ€ë¹„ í‰ê°€ ê¸ˆì•¡ê³¼ ìˆ˜ìµë¥ ì…ë‹ˆë‹¤.</p>
+                    <p className="text-xs text-slate-400">µî·ÏµÈ ÅõÀÚ ÀÚ»ê Á¾¸ñº° ¿ø±İ ´ëºñ Æò°¡ ±İ¾×°ú ¼öÀÍ·üÀÔ´Ï´Ù.</p>
                   </div>
 
                   {/* Compound Stock Bars */}
                   <div className="space-y-6 py-2" id="stock_bars_display">
                     {investmentAssets.length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">ì•„ì§ ë“±ë¡ëœ íˆ¬ì ìì‚°ì´ ì—†ìŠµë‹ˆë‹¤. ìì‚° íƒ­ì—ì„œ ì—‘ì…€ì„ ì—…ë¡œë“œí•´ ì£¼ì„¸ìš”.</p>
+                      <p className="text-xs text-slate-400 text-center py-6">¾ÆÁ÷ µî·ÏµÈ ÅõÀÚ ÀÚ»êÀÌ ¾ø½À´Ï´Ù. ÀÚ»ê ÅÇ¿¡¼­ ¿¢¼¿À» ¾÷·ÎµåÇØ ÁÖ¼¼¿ä.</p>
                     ) : (
                       investmentAssets.map((item, idx) => {
                         const maxVal = Math.max(item.principal, item.appraised, 1);
@@ -4066,7 +4158,7 @@ ${question}`;
                             <div className="flex justify-between items-center text-xs">
                               <strong className="text-slate-800 text-xs sm:text-sm">{item.name}</strong>
                               <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-md ${isProfit ? "text-emerald-600 bg-emerald-50" : "text-rose-600 bg-rose-50"}`}>
-                                ìˆ˜ìµë¥ : {item.yieldRate >= 0 ? "+" : ""}{item.yieldRate}%
+                                ¼öÀÍ·ü: {item.yieldRate >= 0 ? "+" : ""}{item.yieldRate}%
                               </span>
                             </div>
 
@@ -4075,8 +4167,8 @@ ${question}`;
                               {/* Principal Bar */}
                               <div className="relative">
                                 <div className="flex justify-between text-[10px] text-slate-400 mb-0.5 font-bold">
-                                  <span>íˆ¬ì ì›ê¸ˆ:</span>
-                                  <span className="font-mono">{item.principal.toLocaleString()}ì›</span>
+                                  <span>ÅõÀÚ ¿ø±İ:</span>
+                                  <span className="font-mono">{item.principal.toLocaleString()}¿ø</span>
                                 </div>
                                 <div className="w-full bg-slate-100 rounded-lg h-3.5">
                                   <div className="bg-slate-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: `${principalPct}%` }}></div>
@@ -4086,8 +4178,8 @@ ${question}`;
                               {/* Appraised Bar */}
                               <div className="relative">
                                 <div className="flex justify-between text-[10px] text-slate-500 mb-0.5 font-bold">
-                                  <span>í‰ê°€ ê¸ˆì•¡:</span>
-                                  <span className={`font-mono font-bold ${isProfit ? "text-emerald-600" : "text-slate-800"}`}>{item.appraised.toLocaleString()}ì›</span>
+                                  <span>Æò°¡ ±İ¾×:</span>
+                                  <span className={`font-mono font-bold ${isProfit ? "text-emerald-600" : "text-slate-800"}`}>{item.appraised.toLocaleString()}¿ø</span>
                                 </div>
                                 <div className="w-full bg-slate-100 rounded-lg h-3.5">
                                   <div className={`h-3.5 rounded-lg transition-all duration-500 ${isProfit ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: `${appraisedPct}%` }}></div>
@@ -4103,15 +4195,15 @@ ${question}`;
 
               </div>
 
-              {/* ëŒ€ì¶œ ìƒí™˜ ê¸°ë¡ (ì›ë¦¬ê¸ˆê· ë“±/ì›ê¸ˆê· ë“± ë°©ì‹ ìˆœì°¨ ì¬ê³„ì‚°) */}
+              {/* ´ëÃâ »óÈ¯ ±â·Ï (¿ø¸®±İ±Õµî/¿ø±İ±Õµî ¹æ½Ä ¼øÂ÷ Àç°è»ê) */}
               <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-6" id="mortgage_payment_history_section">
                 <div className="border-b border-slate-100 pb-4">
                   <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                     <CreditCard className="w-5 h-5 text-emerald-600" />
-                    <span>ğŸ¦ {LIABILITY_MORTGAGE.name} ìƒí™˜ ê¸°ë¡</span>
+                    <span>?? {LIABILITY_MORTGAGE.name} »óÈ¯ ±â·Ï</span>
                   </h4>
                   <p className="text-xs text-slate-400">
-                    ìƒí™˜í•  ë•Œë§ˆë‹¤ ê·¸ íšŒì°¨ì˜ ì´ì(ë‚¨ì€ ì›ê¸ˆ Ã— ì›” ì´ììœ¨)ë¥¼ ë¨¼ì € ê³„ì‚°í•˜ê³ , ë‚˜ë¨¸ì§€ê°€ ì›ê¸ˆì„ ì¤„ì´ëŠ” ë°©ì‹ìœ¼ë¡œ ì”ì•¡ê³¼ ëˆ„ì  ì´ìë¥¼ ìˆœì°¨ ì¬ê³„ì‚°í•©ë‹ˆë‹¤.
+                    »óÈ¯ÇÒ ¶§¸¶´Ù ±× È¸Â÷ÀÇ ÀÌÀÚ(³²Àº ¿ø±İ ¡¿ ¿ù ÀÌÀÚÀ²)¸¦ ¸ÕÀú °è»êÇÏ°í, ³ª¸ÓÁö°¡ ¿ø±İÀ» ÁÙÀÌ´Â ¹æ½ÄÀ¸·Î ÀÜ¾×°ú ´©Àû ÀÌÀÚ¸¦ ¼øÂ÷ Àç°è»êÇÕ´Ï´Ù.
                   </p>
                 </div>
 
@@ -4134,16 +4226,16 @@ ${question}`;
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="bg-rose-50/40 p-4 rounded-2xl border border-rose-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ  í˜„ì¬ ë‚¨ì€ ì›ê¸ˆ</span>
-                          <strong className="text-base sm:text-lg font-mono text-rose-700 block">{Math.round(remainingBalance).toLocaleString()}ì›</strong>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ÇöÀç ³²Àº ¿ø±İ</span>
+                          <strong className="text-base sm:text-lg font-mono text-rose-700 block">{Math.round(remainingBalance).toLocaleString()}¿ø</strong>
                         </div>
                         <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ’° ëˆ„ì  ì›ê¸ˆ ìƒí™˜ì•¡</span>
-                          <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{Math.round(totalPrincipalPaid).toLocaleString()}ì›</strong>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ´©Àû ¿ø±İ »óÈ¯¾×</span>
+                          <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{Math.round(totalPrincipalPaid).toLocaleString()}¿ø</strong>
                         </div>
                         <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">ğŸ“‰ ëˆ„ì  ë‚©ë¶€ ì´ì</span>
-                          <strong className="text-base sm:text-lg font-mono text-amber-700 block">{Math.round(totalInterestPaid).toLocaleString()}ì›</strong>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? ´©Àû ³³ºÎ ÀÌÀÚ</span>
+                          <strong className="text-base sm:text-lg font-mono text-amber-700 block">{Math.round(totalInterestPaid).toLocaleString()}¿ø</strong>
                         </div>
                       </div>
 
@@ -4162,7 +4254,7 @@ ${question}`;
                         id="mortgage_payment_form"
                       >
                         <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 block">ìƒí™˜ ë‚ ì§œ</label>
+                          <label className="text-[10px] font-bold text-slate-500 block">»óÈ¯ ³¯Â¥</label>
                           <input
                             name="paymentDate"
                             type="date"
@@ -4172,7 +4264,7 @@ ${question}`;
                           />
                         </div>
                         <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 block">ìƒí™˜ì•¡ (ì›)</label>
+                          <label className="text-[10px] font-bold text-slate-500 block">»óÈ¯¾× (¿ø)</label>
                           <input
                             name="paymentAmount"
                             type="number"
@@ -4183,11 +4275,11 @@ ${question}`;
                           />
                         </div>
                         <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 block">ë©”ëª¨ (ì„ íƒ)</label>
+                          <label className="text-[10px] font-bold text-slate-500 block">¸Ş¸ğ (¼±ÅÃ)</label>
                           <input
                             name="paymentMemo"
                             type="text"
-                            placeholder="ì •ê¸° ìƒí™˜ / ì¤‘ë„ìƒí™˜ ë“±"
+                            placeholder="Á¤±â »óÈ¯ / Áßµµ»óÈ¯ µî"
                             className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
                           />
                         </div>
@@ -4195,7 +4287,7 @@ ${question}`;
                           type="submit"
                           className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-4 py-2 rounded-lg transition-all cursor-pointer"
                         >
-                          ìƒí™˜ ê¸°ë¡ ì¶”ê°€
+                          »óÈ¯ ±â·Ï Ãß°¡
                         </button>
                       </form>
 
@@ -4203,34 +4295,34 @@ ${question}`;
                         <table className="w-full text-xs sm:text-sm" id="mortgage_payment_table">
                           <thead>
                             <tr className="border-b border-slate-200 text-slate-500 text-left">
-                              <th className="py-2 pr-3 font-bold whitespace-nowrap">íšŒì°¨</th>
-                              <th className="py-2 pr-3 font-bold whitespace-nowrap">ë‚ ì§œ</th>
-                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ìƒí™˜ì•¡</th>
-                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ì´ì</th>
-                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ì›ê¸ˆ ìƒí™˜ë¶„</th>
-                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ìƒí™˜ í›„ ì”ì•¡</th>
-                              <th className="py-2 pr-3 font-bold whitespace-nowrap">ë©”ëª¨</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">È¸Â÷</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">³¯Â¥</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">»óÈ¯¾×</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">ÀÌÀÚ</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">¿ø±İ »óÈ¯ºĞ</th>
+                              <th className="py-2 pr-3 font-bold text-right whitespace-nowrap">»óÈ¯ ÈÄ ÀÜ¾×</th>
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap">¸Ş¸ğ</th>
                               <th className="py-2 pr-3 font-bold whitespace-nowrap"></th>
                             </tr>
                           </thead>
                           <tbody>
                             {rows.length === 0 ? (
-                              <tr><td colSpan={8} className="text-center py-8 text-slate-400">ì•„ì§ ê¸°ë¡ëœ ìƒí™˜ ë‚´ì—­ì´ ì—†ìŠµë‹ˆë‹¤.</td></tr>
+                              <tr><td colSpan={8} className="text-center py-8 text-slate-400">¾ÆÁ÷ ±â·ÏµÈ »óÈ¯ ³»¿ªÀÌ ¾ø½À´Ï´Ù.</td></tr>
                             ) : (
                               rows.map((r, i) => (
                                 <tr key={r.id} className="border-b border-slate-100">
-                                  <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{i + 1}íšŒ</td>
+                                  <td className="py-2 pr-3 text-slate-500 whitespace-nowrap">{i + 1}È¸</td>
                                   <td className="py-2 pr-3 font-mono text-slate-500 whitespace-nowrap">{r.paymentDate}</td>
-                                  <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{r.amount.toLocaleString()}ì›</td>
-                                  <td className="py-2 pr-3 text-right font-mono text-amber-600 whitespace-nowrap">{Math.round(r.interest).toLocaleString()}ì›</td>
-                                  <td className="py-2 pr-3 text-right font-mono text-emerald-600 whitespace-nowrap">{Math.round(r.principalPortion).toLocaleString()}ì›</td>
-                                  <td className="py-2 pr-3 text-right font-mono text-rose-600 whitespace-nowrap">{Math.round(r.balanceAfter).toLocaleString()}ì›</td>
+                                  <td className="py-2 pr-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{r.amount.toLocaleString()}¿ø</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-amber-600 whitespace-nowrap">{Math.round(r.interest).toLocaleString()}¿ø</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-emerald-600 whitespace-nowrap">{Math.round(r.principalPortion).toLocaleString()}¿ø</td>
+                                  <td className="py-2 pr-3 text-right font-mono text-rose-600 whitespace-nowrap">{Math.round(r.balanceAfter).toLocaleString()}¿ø</td>
                                   <td className="py-2 pr-3 text-slate-500">{r.memo || "-"}</td>
                                   <td className="py-2 pr-3">
                                     <button
                                       onClick={() => handleDeleteMortgagePayment(r.id)}
                                       className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                                      title="ìƒí™˜ ê¸°ë¡ ì‚­ì œ"
+                                      title="»óÈ¯ ±â·Ï »èÁ¦"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
                                     </button>
@@ -4253,18 +4345,18 @@ ${question}`;
             <div className="space-y-8" id="improvement_report_tab">
               {(() => {
                 const activeLedger = ledger.filter(item => item.active);
-                const totalIncomeAll = activeLedger.filter(item => item.type === "ìˆ˜ì…").reduce((sum, item) => sum + item.amount, 0);
-                const totalExpenseAll = activeLedger.filter(item => item.type === "ì§€ì¶œ").reduce((sum, item) => sum + item.amount, 0);
+                const totalIncomeAll = activeLedger.filter(item => item.type === "¼öÀÔ").reduce((sum, item) => sum + item.amount, 0);
+                const totalExpenseAll = activeLedger.filter(item => item.type === "ÁöÃâ").reduce((sum, item) => sum + item.amount, 0);
                 const expenseRatio = totalIncomeAll > 0 ? (totalExpenseAll / totalIncomeAll) * 100 : 0;
                 const fixedExpense = activeLedger
-                  .filter(item => item.type === "ì§€ì¶œ" && getCategoryType(item.category) === "ê³ ì •ë¹„")
+                  .filter(item => item.type === "ÁöÃâ" && getCategoryType(item.category) === "°íÁ¤ºñ")
                   .reduce((sum, item) => sum + item.amount, 0);
                 const variableExpense = Math.max(0, totalExpenseAll - fixedExpense);
                 const fixedRatio = totalExpenseAll > 0 ? (fixedExpense / totalExpenseAll) * 100 : 0;
                 const variableRatio = totalExpenseAll > 0 ? (variableExpense / totalExpenseAll) * 100 : 0;
                 const topExpenseCategory = Object.entries(
                   activeLedger
-                    .filter(item => item.type === "ì§€ì¶œ")
+                    .filter(item => item.type === "ÁöÃâ")
                     .reduce((acc, item) => {
                       acc[item.category] = (acc[item.category] || 0) + item.amount;
                       return acc;
@@ -4272,64 +4364,64 @@ ${question}`;
                 ).sort((a, b) => b[1] - a[1])[0];
                 const diagnosis =
                   expenseRatio >= 80
-                    ? "ìˆ˜ì… ëŒ€ë¹„ ì§€ì¶œ ë¹„ì¤‘ì´ ë†’ìŠµë‹ˆë‹¤. ë°˜ë³µ ê²°ì œì™€ ê³ ì •ë¹„ë¥¼ ë¨¼ì € ë‚®ì¶°ì•¼ í˜„ê¸ˆíë¦„ ê°œì„  íš¨ê³¼ê°€ í½ë‹ˆë‹¤."
+                    ? "¼öÀÔ ´ëºñ ÁöÃâ ºñÁßÀÌ ³ô½À´Ï´Ù. ¹İº¹ °áÁ¦¿Í °íÁ¤ºñ¸¦ ¸ÕÀú ³·Ãç¾ß Çö±İÈå¸§ °³¼± È¿°ú°¡ Å®´Ï´Ù."
                     : expenseRatio >= 60
-                      ? "ì§€ì¶œ ë¹„ì¤‘ì€ ê´€ë¦¬ ê°€ëŠ¥í•œ ë²”ìœ„ì§€ë§Œ, ìƒìœ„ ì†Œë¹„ ì¹´í…Œê³ ë¦¬ì˜ ì˜ˆì‚°ì„ ì„ ì›” ë‹¨ìœ„ë¡œ ì¶”ì í•  í•„ìš”ê°€ ìˆìŠµë‹ˆë‹¤."
-                      : "ìˆ˜ì… ëŒ€ë¹„ ì§€ì¶œ êµ¬ì¡°ê°€ ì•ˆì •ì ì…ë‹ˆë‹¤. ë‚¨ëŠ” í˜„ê¸ˆíë¦„ì„ ë¹„ìƒê¸ˆ, ì¡°ê¸°ìƒí™˜, íˆ¬ì ì¬ì›ìœ¼ë¡œ ë¶„ë¦¬í•´ë„ ì¢‹ìŠµë‹ˆë‹¤.";
+                      ? "ÁöÃâ ºñÁßÀº °ü¸® °¡´ÉÇÑ ¹üÀ§Áö¸¸, »óÀ§ ¼Òºñ Ä«Å×°í¸®ÀÇ ¿¹»ê¼±À» ¿ù ´ÜÀ§·Î ÃßÀûÇÒ ÇÊ¿ä°¡ ÀÖ½À´Ï´Ù."
+                      : "¼öÀÔ ´ëºñ ÁöÃâ ±¸Á¶°¡ ¾ÈÁ¤ÀûÀÔ´Ï´Ù. ³²´Â Çö±İÈå¸§À» ºñ»ó±İ, Á¶±â»óÈ¯, ÅõÀÚ Àç¿øÀ¸·Î ºĞ¸®ÇØµµ ÁÁ½À´Ï´Ù.";
 
                 return (
                   <>
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6">
                       <div>
                         <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                          <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">ğŸ§©</span>
-                          <span>ì¬ë¬´ ì²´ì§ˆ ê°œì„  ë¦¬í¬íŠ¸</span>
+                          <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">??</span>
+                          <span>Àç¹« Ã¼Áú °³¼± ¸®Æ÷Æ®</span>
                         </h3>
                         <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                          Supabase ìµœì‹  ìˆ˜ì…/ì§€ì¶œ/ìì‚° ë°ì´í„°ë¥¼ ê¸°ì¤€ìœ¼ë¡œ ê°€ê³„ êµ¬ì¡°ë¥¼ ìë™ ì§„ë‹¨í•©ë‹ˆë‹¤.
+                          Supabase ÃÖ½Å ¼öÀÔ/ÁöÃâ/ÀÚ»ê µ¥ÀÌÅÍ¸¦ ±âÁØÀ¸·Î °¡°è ±¸Á¶¸¦ ÀÚµ¿ Áø´ÜÇÕ´Ï´Ù.
                         </p>
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                         <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
-                          <span className="text-xs font-bold text-slate-500">ìˆ˜ì… ëŒ€ë¹„ ì§€ì¶œ</span>
+                          <span className="text-xs font-bold text-slate-500">¼öÀÔ ´ëºñ ÁöÃâ</span>
                           <strong className="block mt-2 text-2xl font-black font-mono text-rose-600">{expenseRatio.toFixed(1)}%</strong>
                         </div>
                         <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
-                          <span className="text-xs font-bold text-slate-500">ê³ ì •ë¹„ / ë³€ë™ë¹„</span>
+                          <span className="text-xs font-bold text-slate-500">°íÁ¤ºñ / º¯µ¿ºñ</span>
                           <strong className="block mt-2 text-2xl font-black font-mono text-indigo-700">{fixedRatio.toFixed(1)}% / {variableRatio.toFixed(1)}%</strong>
                         </div>
                         <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
-                          <span className="text-xs font-bold text-slate-500">ìˆœê¸ˆìœµìì‚°</span>
-                          <strong className={`block mt-2 text-2xl font-black font-mono ${netWorth >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{netWorth.toLocaleString()}ì›</strong>
+                          <span className="text-xs font-bold text-slate-500">¼ø±İÀ¶ÀÚ»ê</span>
+                          <strong className={`block mt-2 text-2xl font-black font-mono ${netWorth >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{netWorth.toLocaleString()}¿ø</strong>
                         </div>
                         <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
-                          <span className="text-xs font-bold text-slate-500">ê°€ê³„ ì´ ìì‚°</span>
-                          <strong className="block mt-2 text-2xl font-black font-mono text-slate-900">{totalAssets.toLocaleString()}ì›</strong>
+                          <span className="text-xs font-bold text-slate-500">°¡°è ÃÑ ÀÚ»ê</span>
+                          <strong className="block mt-2 text-2xl font-black font-mono text-slate-900">{totalAssets.toLocaleString()}¿ø</strong>
                         </div>
                       </div>
 
                       <div className="bg-blue-50/50 border-l-4 border-blue-500 rounded-r-2xl p-4">
-                        <p className="text-sm font-bold text-blue-900">ìë™ ì§„ë‹¨</p>
+                        <p className="text-sm font-bold text-blue-900">ÀÚµ¿ Áø´Ü</p>
                         <p className="text-xs sm:text-sm text-slate-700 mt-1 leading-relaxed">{diagnosis}</p>
                         {topExpenseCategory && (
                           <p className="text-xs text-slate-500 mt-2">
-                            í˜„ì¬ ê°€ì¥ í° ì§€ì¶œ ì¹´í…Œê³ ë¦¬ëŠ” <strong>{topExpenseCategory[0]}</strong>ì´ë©°, í•©ê³„ëŠ” <strong>{topExpenseCategory[1].toLocaleString()}ì›</strong>ì…ë‹ˆë‹¤.
+                            ÇöÀç °¡Àå Å« ÁöÃâ Ä«Å×°í¸®´Â <strong>{topExpenseCategory[0]}</strong>ÀÌ¸ç, ÇÕ°è´Â <strong>{topExpenseCategory[1].toLocaleString()}¿ø</strong>ÀÔ´Ï´Ù.
                           </p>
                         )}
                       </div>
                     </div>
 
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-5">
-                      <h3 className="text-lg font-bold text-slate-900">ì•± ë° ê¸°ëŠ¥ ê°œì„  ì œì•ˆ</h3>
+                      <h3 className="text-lg font-bold text-slate-900">¾Û ¹× ±â´É °³¼± Á¦¾È</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {[
-                          "ì¹´í…Œê³ ë¦¬ë³„ ì›” ì˜ˆì‚°ì„ ì„ ì €ì¥í•˜ê³  80%, 100% ë„ë‹¬ ì‹œ ê²½ê³  í‘œì‹œ",
-                          "ìµœê·¼ 3ê°œì›” í‰ê·  ëŒ€ë¹„ ê¸‰ì¦í•œ ì†Œë¹„ í•­ëª© ìë™ ì•Œë¦¼",
-                          "ë¹„ìƒê¸ˆ ëª©í‘œì•¡ê³¼ í˜„ì¬ ë‹¬ì„±ë¥ ì„ ìì‚° ë°ì´í„°ì™€ ì—°ê²°",
-                          "ì˜ë²”/ì¬ì€ ìì‚° ë¹„ì¤‘ê³¼ ê°€ê³„ ì´ ìì‚° ì¶”ì´ë¥¼ ì›”ë³„ë¡œ ë¹„êµ",
-                          "Gemini ì±—ë´‡ ì¶”ì²œ ë‚´ìš©ì„ ë¦¬í¬íŠ¸ ë©”ëª¨ë¡œ ì €ì¥",
-                          "ì£¼ë‹´ëŒ€ ì¡°ê¸°ìƒí™˜ ì‹œë®¬ë ˆì´í„° ê²°ê³¼ë¥¼ ì›”ë³„ ìƒí™˜ ê³„íšìœ¼ë¡œ ì €ì¥"
+                          "Ä«Å×°í¸®º° ¿ù ¿¹»ê¼±À» ÀúÀåÇÏ°í 80%, 100% µµ´Ş ½Ã °æ°í Ç¥½Ã",
+                          "ÃÖ±Ù 3°³¿ù Æò±Õ ´ëºñ ±ŞÁõÇÑ ¼Òºñ Ç×¸ñ ÀÚµ¿ ¾Ë¸²",
+                          "ºñ»ó±İ ¸ñÇ¥¾×°ú ÇöÀç ´Ş¼º·üÀ» ÀÚ»ê µ¥ÀÌÅÍ¿Í ¿¬°á",
+                          "¿µ¹ü/ÀçÀº ÀÚ»ê ºñÁß°ú °¡°è ÃÑ ÀÚ»ê ÃßÀÌ¸¦ ¿ùº°·Î ºñ±³",
+                          "Gemini Ãªº¿ ÃßÃµ ³»¿ëÀ» ¸®Æ÷Æ® ¸Ş¸ğ·Î ÀúÀå",
+                          "ÁÖ´ã´ë Á¶±â»óÈ¯ ½Ã¹Ä·¹ÀÌÅÍ °á°ú¸¦ ¿ùº° »óÈ¯ °èÈ¹À¸·Î ÀúÀå"
                         ].map((item) => (
                           <div key={item} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs sm:text-sm text-slate-700 font-semibold">
                             {item}
@@ -4347,8 +4439,8 @@ ${question}`;
 
         {/* --- GLOBAL APP FOOTER --- */}
         <footer className="bg-white border-t border-slate-200 px-8 py-6 text-center text-[11px] sm:text-xs text-slate-400" id="global_footer">
-          <p className="font-medium">Â© 2026 ìµœì˜ë²”Â·ê°•ì¬ì€ í†µí•© ì¬ì • ëŒ€ì‹œë³´ë“œ. All Rights Reserved.</p>
-          <p className="text-[10px] text-slate-300 mt-1">Designed with precision in Google AI Studio â€¢ Professional Polish Theme</p>
+          <p className="font-medium">¨Ï 2026 ÃÖ¿µ¹ü¡¤°­ÀçÀº ÅëÇÕ ÀçÁ¤ ´ë½Ãº¸µå. All Rights Reserved.</p>
+          <p className="text-[10px] text-slate-300 mt-1">Designed with precision in Google AI Studio ? Professional Polish Theme</p>
         </footer>
 
       </main>
@@ -4356,3 +4448,4 @@ ${question}`;
     </div>
   );
 }
+

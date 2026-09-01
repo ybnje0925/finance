@@ -24,6 +24,17 @@ export interface InvestmentItem {
   yieldRate: number;
 }
 
+export interface AssetSnapshot {
+  freeAssets: { name: string; amount: number }[];
+  savingsAssets: { name: string; amount: number }[];
+  electronicAssets: { name: string; amount: number }[];
+  investmentAssets: InvestmentItem[];
+  liability?: {
+    amount: number;
+    rate?: number | null;
+  };
+}
+
 export interface ChecklistItem {
   id: number;
   label: string;
