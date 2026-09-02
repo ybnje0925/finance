@@ -3389,6 +3389,29 @@ ${question}`;
                 const assetMonthSource = assetMonths.length > 0 ? assetMonths : uniqueMonths;
                 const compareList = assetCompareMonths.length > 0 ? assetCompareMonths : (assetMonthSource.length > 0 ? assetMonthSource.slice(-3) : [anchorMonth]);
                 const points = compareList.map(m => ({ month: m, value: assetSnapshots[m] ? assetSnapshotTotal(assetSnapshots[m]) : estimateAssetsForMonth(m) }));
+                const assetOwnerColumns = ["영범", "재은"] as const;
+                const freeAssetsByOwner = assetOwnerColumns.map(owner => {
+                  const items = freeAssets
+                    .map((acc, idx) => ({ acc, idx }))
+                    .filter(({ acc }) => parseAssetOwner(acc.name) === owner)
+                    .sort((a, b) => b.acc.amount - a.acc.amount);
+                  return { owner, items, total: items.reduce((sum, { acc }) => sum + acc.amount, 0) };
+                });
+                const unassignedFreeAssets = freeAssets
+                  .map((acc, idx) => ({ acc, idx }))
+                  .filter(({ acc }) => !assetOwnerColumns.includes(parseAssetOwner(acc.name) as typeof assetOwnerColumns[number]))
+                  .sort((a, b) => b.acc.amount - a.acc.amount);
+                const investmentAssetsByOwner = assetOwnerColumns.map(owner => {
+                  const items = investmentAssets
+                    .map((acc, idx) => ({ acc, idx }))
+                    .filter(({ acc }) => parseAssetOwner(acc.name) === owner)
+                    .sort((a, b) => b.acc.appraised - a.acc.appraised);
+                  return { owner, items, total: items.reduce((sum, { acc }) => sum + acc.appraised, 0) };
+                });
+                const unassignedInvestmentAssets = investmentAssets
+                  .map((acc, idx) => ({ acc, idx }))
+                  .filter(({ acc }) => !assetOwnerColumns.includes(parseAssetOwner(acc.name) as typeof assetOwnerColumns[number]))
+                  .sort((a, b) => b.acc.appraised - a.acc.appraised);
 
                 const maxVal = Math.max(...points.map(p => p.value), 1);
                 const minVal = Math.min(...points.map(p => p.value), 0);
@@ -3447,28 +3470,66 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.free && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {freeAssets
-                              .map((acc, idx) => ({ acc, idx }))
-                              .sort((a, b) => b.acc.amount - a.acc.amount)
-                              .map(({ acc, idx }) => (
-                              <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                <div className="flex justify-between items-center gap-2">
-                                  <span className="truncate max-w-[130px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                  <span className="shrink-0">{acc.amount.toLocaleString()}원</span>
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {freeAssetsByOwner.map(({ owner, items, total }) => (
+                                <div key={owner} className="rounded-xl bg-slate-950/25 border border-white/10 p-3 min-w-0">
+                                  <div className="flex items-start justify-between gap-2 border-b border-white/10 pb-2">
+                                    <div>
+                                      <span className="font-sans text-[10px] font-black text-emerald-300">{owner}</span>
+                                      <p className="font-sans text-[9px] text-slate-500 mt-0.5">자유입출금 합계</p>
+                                    </div>
+                                    <strong className="text-right text-white text-[11px] shrink-0">{total.toLocaleString()}원</strong>
+                                  </div>
+                                  <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                    {items.length === 0 ? (
+                                      <p className="font-sans text-[10px] text-slate-500 py-4 text-center">등록된 자산 없음</p>
+                                    ) : (
+                                      items.map(({ acc, idx }) => (
+                                        <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
+                                          <div className="flex justify-between items-center gap-2">
+                                            <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                            <span className="shrink-0">{acc.amount.toLocaleString()}원</span>
+                                          </div>
+                                          <select
+                                            value={parseAssetOwner(acc.name)}
+                                            onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
+                                            className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                            title="계좌 명의 지정"
+                                          >
+                                            {ASSET_OWNER_OPTIONS.map(o => (
+                                              <option key={o} value={o} className="text-slate-900">{o}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      ))
+                                    )}
+                                  </div>
                                 </div>
-                                <select
-                                  value={parseAssetOwner(acc.name)}
-                                  onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
-                                  className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                  title="계좌 명의 지정"
-                                >
-                                  {ASSET_OWNER_OPTIONS.map(o => (
-                                    <option key={o} value={o} className="text-slate-900">{o}</option>
+                              ))}
+                            </div>
+                            {unassignedFreeAssets.length > 0 && (
+                              <div className="rounded-xl bg-amber-400/10 border border-amber-300/20 p-3">
+                                <p className="font-sans text-[10px] text-amber-200 font-bold">미지정 자산은 명의를 선택하면 영범/재은 칸으로 이동합니다.</p>
+                                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {unassignedFreeAssets.map(({ acc, idx }) => (
+                                    <div key={acc.name + idx} className="flex items-center justify-between gap-2">
+                                      <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                      <select
+                                        value={parseAssetOwner(acc.name)}
+                                        onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
+                                        className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                        title="계좌 명의 지정"
+                                      >
+                                        {ASSET_OWNER_OPTIONS.map(o => (
+                                          <option key={o} value={o} className="text-slate-900">{o}</option>
+                                        ))}
+                                      </select>
+                                    </div>
                                   ))}
-                                </select>
+                                </div>
                               </div>
-                            ))}
+                            )}
                           </div>
                         )}
                       </div>
@@ -3488,38 +3549,76 @@ ${question}`;
                           <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}원</strong>
                         </div>
                         {expandedAssets.investment && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-1.5 text-[10px] text-slate-300 max-h-48 overflow-y-auto font-mono">
-                            {investmentAssets
-                              .map((acc, idx) => ({ acc, idx }))
-                              .sort((a, b) => b.acc.appraised - a.acc.appraised)
-                              .map(({ acc, idx }) => {
-                              const isStock = acc.yieldRate !== 0;
-                              return (
-                                <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                  <div className="flex justify-between items-center gap-2">
-                                    <span className="truncate max-w-[110px]" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                    <div className="text-right shrink-0">
-                                      <span>{acc.appraised.toLocaleString()}원</span>
-                                      {isStock && (
-                                        <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                          ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
-                                        </span>
-                                      )}
+                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {investmentAssetsByOwner.map(({ owner, items, total }) => (
+                                <div key={owner} className="rounded-xl bg-slate-950/25 border border-white/10 p-3 min-w-0">
+                                  <div className="flex items-start justify-between gap-2 border-b border-white/10 pb-2">
+                                    <div>
+                                      <span className="font-sans text-[10px] font-black text-emerald-300">{owner}</span>
+                                      <p className="font-sans text-[9px] text-slate-500 mt-0.5">투자자산 합계</p>
                                     </div>
+                                    <strong className="text-right text-white text-[11px] shrink-0">{total.toLocaleString()}원</strong>
                                   </div>
-                                  <select
-                                    value={parseAssetOwner(acc.name)}
-                                    onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
-                                    className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                    title="계좌 명의 지정"
-                                  >
-                                    {ASSET_OWNER_OPTIONS.map(o => (
-                                      <option key={o} value={o} className="text-slate-900">{o}</option>
-                                    ))}
-                                  </select>
+                                  <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                    {items.length === 0 ? (
+                                      <p className="font-sans text-[10px] text-slate-500 py-4 text-center">등록된 자산 없음</p>
+                                    ) : (
+                                      items.map(({ acc, idx }) => {
+                                        const isStock = acc.yieldRate !== 0;
+                                        return (
+                                          <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
+                                            <div className="flex justify-between items-center gap-2">
+                                              <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                              <div className="text-right shrink-0">
+                                                <span>{acc.appraised.toLocaleString()}원</span>
+                                                {isStock && (
+                                                  <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                                    ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
+                                                  </span>
+                                                )}
+                                              </div>
+                                            </div>
+                                            <select
+                                              value={parseAssetOwner(acc.name)}
+                                              onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
+                                              className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                              title="계좌 명의 지정"
+                                            >
+                                              {ASSET_OWNER_OPTIONS.map(o => (
+                                                <option key={o} value={o} className="text-slate-900">{o}</option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                        );
+                                      })
+                                    )}
+                                  </div>
                                 </div>
-                              );
-                            })}
+                              ))}
+                            </div>
+                            {unassignedInvestmentAssets.length > 0 && (
+                              <div className="rounded-xl bg-amber-400/10 border border-amber-300/20 p-3">
+                                <p className="font-sans text-[10px] text-amber-200 font-bold">미지정 투자자산은 명의를 선택하면 영범/재은 칸으로 이동합니다.</p>
+                                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {unassignedInvestmentAssets.map(({ acc, idx }) => (
+                                    <div key={acc.name + idx} className="flex items-center justify-between gap-2">
+                                      <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
+                                      <select
+                                        value={parseAssetOwner(acc.name)}
+                                        onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
+                                        className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
+                                        title="계좌 명의 지정"
+                                      >
+                                        {ASSET_OWNER_OPTIONS.map(o => (
+                                          <option key={o} value={o} className="text-slate-900">{o}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
