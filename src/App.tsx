@@ -8,7 +8,6 @@ import {
   Home, 
   DollarSign, 
   TrendingUp, 
-  CheckSquare, 
   CreditCard,
   Trash2,
   Percent, 
@@ -18,7 +17,6 @@ import {
   Check,
   AlertTriangle, 
   HelpCircle,
-  PiggyBank,
   ArrowUpRight,
   ArrowDownRight,
   Upload,
@@ -332,7 +330,7 @@ export default function App() {
     if (error) {
       setForgotError(error.message);
     } else {
-      setForgotMessage("?? 입력하신 이메일로 비밀번호 재설정 링크를 보냈습니다. 메일함(스팸함 포함)을 확인해 주세요.");
+      setForgotMessage("입력하신 이메일로 비밀번호 재설정 링크를 보냈습니다. 메일함(스팸함 포함)을 확인해 주세요.");
     }
     setForgotSubmitting(false);
   };
@@ -1067,7 +1065,7 @@ export default function App() {
     const top5 = sortedCategories.slice(0, 5) as [string, number][];
     
     const insights: string[] = [];
-    insights.push(`?? **${m}월 총 지출은 ${totalExpense.toLocaleString()}원**입니다.`);
+    insights.push(`**${m}월 총 지출은 ${totalExpense.toLocaleString()}원**입니다.`);
     
     const fixedStatus = fixedRatio <= 40 ? "적정 수준(40% 이하)이며" : "다소 높은 편(40% 초과)으로 집중 관리가 필요하며";
     insights.push(`고정비 비중이 **${fixedRatio.toFixed(1)}% (${fixedSum.toLocaleString()}원)**로 ${fixedStatus}, 변동비 비중은 **${variableRatio.toFixed(1)}% (${variableSum.toLocaleString()}원)**입니다.`);
@@ -1100,139 +1098,6 @@ export default function App() {
       top5,
       summaryText
     };
-  };
-
-  // --- 5. ENHANCED AI WEALTH ADVISOR REPORT ENGINE ---
-  const renderAiReport = () => {
-    // 1) 식비 및 양육/기타 변동비 항목의 적정성 평가
-    const selectedExpenses = ledger.filter(item => item.month === selectedMonth && item.type === "지출" && item.active);
-    
-    const isFood = (cat: string) => {
-      const lower = cat.toLowerCase();
-      return ["식비", "마트", "배달", "외식", "식재료", "커피", "음료", "양식", "한식", "중식", "일식", "편의점", "카페", "간식", "음품", "푸드", "장보기"].some(k => lower.includes(k));
-    };
-    const isChild = (cat: string) => {
-      const lower = cat.toLowerCase();
-      return ["양육", "육아", "교육", "어린이집", "유치원", "학원", "기타", "양육/기타"].some(k => lower.includes(k));
-    };
-
-    const foodCost = selectedExpenses.filter(item => isFood(item.category)).reduce((sum, item) => sum + item.amount, 0);
-    const childCost = selectedExpenses.filter(item => isChild(item.category)).reduce((sum, item) => sum + item.amount, 0);
-    const totalSelectedExpense = selectedExpenses.reduce((sum, item) => sum + item.amount, 0) || 1;
-
-    const foodRatio = Math.round((foodCost / totalSelectedExpense) * 100);
-    const childRatio = Math.round((childCost / totalSelectedExpense) * 100);
-    
-    // 식비 적정성 평가 (30대 부부 적정 식비 권장 비율은 전체 지출의 15%~25% 내외)
-    let foodStatus = "적정 수준 유지 중";
-    let foodGuidance = "건강하고 균형잡힌 가계 소비 흐름을 이어가고 있습니다.";
-    if (foodRatio > 25) {
-      foodStatus = "식비 비중 다소 높음 (주의)";
-      foodGuidance = "이마트 장보기 및 외식 횟수가 증가했습니다. 비필수 식자재 공동구매나 동네 로컬 마트 특가를 활용해 지출을 5% 이상 억제해 보세요.";
-    } else if (foodRatio < 10 && foodCost > 0) {
-      foodStatus = "식비 극단적 절약 중";
-      foodGuidance = "가계 다이어트가 훌륭하나, 신혼 부부의 영양 균형과 생활 만족도를 위해 지나친 외식 통제보다는 계획적 지출을 권장합니다.";
-    }
-
-    // 양육비 평가 (30대 양육비 비중 가이드: 감사수당 등 고정 지출 포함 20~30% 내외)
-    let childStatus = "계획적 범위 내 집행";
-    let childGuidance = "어머니 감사 수당 등 부모 보조 양육비가 규칙적으로 안정되게 관리되고 있습니다.";
-    if (childRatio > 35) {
-      childStatus = "양육비 과밀화 상태 (정밀 모니터링)";
-      childGuidance = "돌발 육아용품 구매 또는 육아 인프라 초기 셋업 비용이 증가했습니다. 당장 급하지 않은 교구 등은 당근마켓 거래를 적극 제안합니다.";
-    }
-
-    // 2) 가용 자금 및 실시간 수지 피드백
-    const isSurplus = netMonthlyIncome >= 0;
-    const surplusText = isSurplus 
-      ? `현재 당월 순수입(잉여 자금) ${netMonthlyIncome.toLocaleString()}원은 즉시 아래의 3대 자산배분 황금 공식에 태워 조기 운용해야 합니다.`
-      : `현재 당월 재정이 ${Math.abs(netMonthlyIncome).toLocaleString()}원 적자 상태입니다. 주택담보대출 이자 및 초기 이사 부대 비용이 겹친 결과로 보이며, 자유입출금 자산에서 예비비를 수혈해야 합니다.`;
-
-    return (
-      <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-3xl p-6 sm:p-8 border border-indigo-500/20 shadow-xl space-y-6 text-white" id="ai_wealth_report_panel">
-        <div className="flex justify-between items-center border-b border-white/10 pb-4">
-          <div className="flex items-center space-x-3">
-            <div className="bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 p-2 rounded-xl animate-pulse">
-              <PiggyBank className="w-5.5 h-5.5 text-emerald-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-black text-white flex items-center gap-2">
-                <span>?? AI 수석 자산관리사 리포트</span>
-                <span className="bg-emerald-500/20 text-emerald-300 border border-indigo-500/30 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">Premium Advisor</span>
-              </h3>
-              <p className="text-xs text-slate-400 mt-0.5">30대 신혼 및 맞벌이 가구 자산 가이드라인 템플릿 표준 적용</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Advisor Persona Intro */}
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-3 text-xs sm:text-sm text-slate-200">
-          <p className="font-bold text-emerald-400 text-sm">
-            ?? "최영범 님, 강재은 님! 맞벌이 부부의 탄탄하고 계획적인 자산 형성을 위한 스마트 재정 여정을 응원합니다!"
-          </p>
-          <p className="leading-relaxed">
-            자녀 계획 및 초보 부모 세대인 <strong>30대 중반 맞벌이 부부</strong>의 재정 핵심은 <span className="text-indigo-300 font-bold">"부채 원금 상환을 통한 고정비 절감"</span>과 <span className="text-orange-300 font-bold">"생애 첫 주택 마련 이후 자산 포트폴리오의 영리한 체질 개선"</span>에 있습니다. 현재 가계 재정 지표를 전문 자산관리사의 프레임으로 입체 분석해 드리겠습니다.
-          </p>
-        </div>
-
-        {/* Two-Column Diagnostic */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Diagnostic 1: Variable Costs */}
-          <div className="bg-white/5 border border-white/5 rounded-2xl p-4.5 space-y-3.5">
-            <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>??</span> 당월 ({selectedMonth}월) 변동비 적정성 진단
-            </h4>
-            <div className="space-y-3 text-xs">
-              <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
-                <span className="text-slate-400">?? 당월 식비 지출 비율:</span>
-                <span className="font-bold font-mono text-emerald-400">{foodRatio}% ({foodCost.toLocaleString()}원)</span>
-              </div>
-              <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
-                <span className="text-slate-400">?? 당월 양육/기타 비율:</span>
-                <span className="font-bold font-mono text-emerald-400">{childRatio}% ({childCost.toLocaleString()}원)</span>
-              </div>
-              
-              <div className="pt-2 border-t border-white/5 space-y-1.5 leading-relaxed text-slate-300">
-                <p><strong>[식비] {foodStatus}:</strong> {foodGuidance}</p>
-                <p><strong>[양육비] {childStatus}:</strong> {childGuidance}</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Diagnostic 2: Portfolio Asset Allocation */}
-          <div className="bg-white/5 border border-white/5 rounded-2xl p-4.5 space-y-3.5">
-            <h4 className="text-xs font-bold text-orange-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>???</span> 포트폴리오 안전성 및 예적금 과다 편중 진단
-            </h4>
-            <div className="space-y-3 text-xs leading-relaxed text-slate-300">
-              <p>
-                현재 가계 자산의 <span className="text-red-300 font-bold">{cashPercent}%가 예적금 및 현금성 자산</span>에 과도하게 치우쳐 있습니다. 저금리 현금 유치는 대출 금리보다 실질 수익률이 낮아 장기적으로 자산 가치가 잠식됩니다.
-              </p>
-              <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1 text-[11px]">
-                <span className="text-orange-400 font-bold block">?? AI 자산관리사의 황금 분배 제안:</span>
-                현재 {LIABILITY_MORTGAGE.name} {LIABILITY_MORTGAGE.amount.toLocaleString()}원의 금리가 <strong>연 {LIABILITY_MORTGAGE.rate}%</strong>로 상당한 고금리 부담입니다. 자산관리 관점에서 <span className="text-emerald-300 font-bold">"대출 원금 중도상환 대 미국 S&P500 분할 투자"를 6:4의 황금 비율</span>로 가져가세요.
-                대출 이자율인 {LIABILITY_MORTGAGE.rate}%는 확정적 고수익율과 같으므로, 여유자금이 생길 때마다 적극 중도 상환하여 이자 누출을 원천 단축하고, 나머지 40%는 {bestInvestment ? `현재 포트폴리오에서 수익률이 가장 높은 ${bestInvestment.name}(${bestInvestment.yieldRate >= 0 ? "+" : ""}${bestInvestment.yieldRate}% 수익 입증됨)` : "복리 효과가 검증된 우량 지수 추종 ETF"}에 적립식으로 지속 분할 매수하는 것이 압도적으로 유리합니다.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Dynamic Action Plan */}
-        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-5 text-xs sm:text-sm space-y-2">
-          <p className="font-bold text-emerald-400 flex items-center gap-2">
-            <span>??</span> 실시간 피드백 기반 금월 재정 투입 계획
-          </p>
-          <p className="text-slate-300 leading-relaxed">
-            {surplusText} 
-            {isSurplus && (
-              <span className="block mt-2 text-slate-200 font-bold">
-                추천 배분안: 중도원금상환액 {(netMonthlyIncome * 0.6).toLocaleString()}원 (60%) + 미국 S&P500 적립 투자 {(netMonthlyIncome * 0.4).toLocaleString()}원 (40%) 투입을 설계하세요.
-              </span>
-            )}
-          </p>
-        </div>
-      </div>
-    );
   };
 
   // API Key 입력창에 이 암구호를 넣으면, 개인 키 대신 서버(Vercel 서버리스 함수)에 보관된
@@ -1493,12 +1358,12 @@ ${question}`;
 
           syncLedgerReplaceToSupabase(uniqueItems).then(ok => {
             if (!ok) {
-              alert("?? 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
+              alert("이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
             }
           });
           updateHouseholdSettingsInSupabase({ ledger_file_name: file.name });
 
-          alert(`?? 수입/지출 내역 ${uniqueItems.length}건이 성공적으로 연동되었습니다!`);
+          alert(`수입/지출 내역 ${uniqueItems.length}건이 성공적으로 연동되었습니다!`);
         } else {
           alert("업로드된 파일에서 유효한 수입/지출 내역 시트를 발견하지 못했습니다.");
         }
@@ -1854,7 +1719,7 @@ ${question}`;
           setAssetsFileName(file.name);
           syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments).then(ok => {
             if (!ok) {
-              alert("?? 이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
+              alert("이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
             }
           });
           updateHouseholdSettingsInSupabase({
@@ -1862,7 +1727,7 @@ ${question}`;
             ...(defaultSnapshot.liability?.amount ? { mortgage_amount: defaultSnapshot.liability.amount } : {}),
             ...(defaultSnapshot.liability?.rate ? { mortgage_rate: defaultSnapshot.liability.rate } : {})
           });
-          alert(`?? 자산/부채 현황 ${assetsSuccessCount}개 계좌가 ${nextAssetMonths.length}개 월 snapshot으로 연동되었습니다!`);
+          alert(`자산/부채 현황 ${assetsSuccessCount}개 계좌가 ${nextAssetMonths.length}개 월 snapshot으로 연동되었습니다!`);
         } else {
           alert("업로드된 파일에서 유효한 자산/부채 현황 정보를 찾지 못했습니다.");
         }
@@ -2015,7 +1880,6 @@ ${question}`;
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="reset_password_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
           <div className="text-center space-y-1">
-            <div className="text-3xl">??</div>
             <h1 className="text-lg font-bold text-slate-900">새 비밀번호 설정</h1>
             <p className="text-xs text-slate-400">새로 사용할 비밀번호를 입력해 주세요</p>
           </div>
@@ -2071,7 +1935,6 @@ ${question}`;
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4" id="login_screen">
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 w-full max-w-sm space-y-5">
           <div className="text-center space-y-1">
-            <div className="text-3xl">??</div>
             <h1 className="text-lg font-bold text-slate-900">연준이네 가계부</h1>
             <p className="text-xs text-slate-400">
               {authView === "forgot" ? "가입한 이메일로 재설정 링크를 받으세요" : "부부가 공유하는 계정으로 로그인하세요"}
@@ -2172,7 +2035,7 @@ ${question}`;
             <Home className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight">?? 연준이네 가계부</h1>
+            <h1 className="text-lg font-bold tracking-tight">연준이네 가계부</h1>
             <p className="text-xs text-slate-400">우리집 통합 재정 대시보드</p>
           </div>
         </div>
@@ -2181,7 +2044,7 @@ ${question}`;
         <div className="p-5 border-b border-slate-800 bg-slate-950/20 space-y-4" id="sidebar_excel_uploader">
           <div>
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2 flex items-center gap-1">
-              <span>??</span> 수입/지출 내역 업로드
+              수입/지출 내역 업로드
             </span>
             <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 bg-slate-900/60 hover:bg-slate-800/40 transition-all text-center cursor-pointer relative group">
               <input 
@@ -2204,7 +2067,7 @@ ${question}`;
 
           <div>
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2 flex items-center gap-1">
-              <span>??</span> 자산/부채 현황 업로드
+              자산/부채 현황 업로드
             </span>
             <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 bg-slate-900/60 hover:bg-slate-800/40 transition-all text-center cursor-pointer relative group">
               <input 
@@ -2228,20 +2091,20 @@ ${question}`;
 
         {/* Sidebar Upload Status Summary & Management */}
         <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/40">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">?? 데이터 업로드 상태</span>
+          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">데이터 업로드 상태</span>
           <div className="space-y-2 text-xs">
             <div className="flex flex-col bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
-              <span className="text-[10px] text-slate-400">?? 수입/지출 데이터</span>
+              <span className="text-[10px] text-slate-400">수입/지출 데이터</span>
               <span className="font-semibold text-slate-200 truncate mt-0.5">
-                {ledgerFileName ? `? ${ledgerFileName}` : "?? 기본 샘플 데이터 사용 중"}
+                {ledgerFileName ? `${ledgerFileName}` : "기본 샘플 데이터 사용 중"}
               </span>
               <span className="text-[9px] text-emerald-400 font-bold mt-0.5">({ledger.length}건 로드됨)</span>
             </div>
 
             <div className="flex flex-col bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
-              <span className="text-[10px] text-slate-400">?? 자산/부채 데이터</span>
+              <span className="text-[10px] text-slate-400">자산/부채 데이터</span>
               <span className="font-semibold text-slate-200 truncate mt-0.5">
-                {assetsFileName ? `? ${assetsFileName}` : "?? 기본 샘플 데이터 사용 중"}
+                {assetsFileName ? `${assetsFileName}` : "기본 샘플 데이터 사용 중"}
               </span>
             </div>
           </div>
@@ -2269,14 +2132,14 @@ ${question}`;
             className="w-full py-2 bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
             title="모든 데이터를 지우고 디폴트 고정값 상태로 초기화합니다."
           >
-            ?? 전체 데이터 초기화
+            전체 데이터 초기화
           </button>
           <button
             onClick={() => window.print()}
             className="w-full py-2 bg-indigo-950 hover:bg-indigo-900 border border-indigo-800 text-indigo-300 rounded-lg text-[11px] font-bold tracking-wide transition-all mt-1"
             title="현재 화면을 PDF로 저장하거나 인쇄합니다."
           >
-            ??? 대시보드 보고서 PDF 출력 / 인쇄
+            대시보드 보고서 PDF 출력 / 인쇄
           </button>
           {isSupabaseConfigured && session && (
             <button
@@ -2285,7 +2148,7 @@ ${question}`;
               title="로그아웃합니다."
               id="logout_button"
             >
-              ?? 로그아웃 ({session.user.email})
+              로그아웃 ({session.user.email})
             </button>
           )}
         </div>
@@ -2327,7 +2190,7 @@ ${question}`;
           
           <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-3.5 text-[11px] text-slate-400 leading-relaxed">
             <p className="font-semibold text-slate-300 mb-1 flex items-center gap-1">
-              <span>??</span> 리액티브 통합 피드백
+              리액티브 통합 피드백
             </p>
             지출/수입 탭에서 항목을 활성화·비활성화하거나 시뮬레이터를 조절하면 모든 자산 계산과 지출 트렌드가 실시간 업데이트됩니다.
           </div>
@@ -2345,7 +2208,7 @@ ${question}`;
             id="nav_btn_overview"
           >
             <Home className="w-4 h-4 text-emerald-400" />
-            <span>?? 총괄 대시보드</span>
+            <span>총괄 대시보드</span>
           </button>
 
           <button
@@ -2358,7 +2221,7 @@ ${question}`;
             id="nav_btn_ledger"
           >
             <DollarSign className="w-4 h-4 text-emerald-400" />
-            <span>?? 지출과 수입</span>
+            <span>지출과 수입</span>
           </button>
 
           <button
@@ -2371,7 +2234,7 @@ ${question}`;
             id="nav_btn_analysis"
           >
             <PieChart className="w-4 h-4 text-emerald-400" />
-            <span>?? 재무적 지출 분석</span>
+            <span>재무적 지출 분석</span>
           </button>
 
           <button
@@ -2384,7 +2247,7 @@ ${question}`;
             id="nav_btn_assets"
           >
             <TrendingUp className="w-4 h-4 text-emerald-400" />
-            <span>?? 자산 및 부채</span>
+            <span>자산 및 부채</span>
           </button>
 
           <button
@@ -2397,7 +2260,7 @@ ${question}`;
             id="nav_btn_report"
           >
             <BarChart2 className="w-4 h-4 text-emerald-400" />
-            <span>?? 가계부 및 앱 개선 리포트</span>
+            <span>가계부 및 앱 개선 리포트</span>
           </button>
         </nav>
 
@@ -2426,11 +2289,11 @@ ${question}`;
               <span>Financial Portal</span>
             </div>
             <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-              {activeTab === "overview" && "?? 총괄 대시보드"}
-              {activeTab === "ledger" && "?? 지출과 수입 (Interactive Ledger)"}
-              {activeTab === "analysis" && "?? 재무적 지출 분석 (Financial Expense Analysis)"}
-              {activeTab === "assets" && "?? 자산 및 부채 (Asset & Trend Analysis)"}
-              {activeTab === "report" && "?? 가계부 및 앱 개선 리포트"}
+              {activeTab === "overview" && "총괄 대시보드"}
+              {activeTab === "ledger" && "지출과 수입 (Interactive Ledger)"}
+              {activeTab === "analysis" && "재무적 지출 분석 (Financial Expense Analysis)"}
+              {activeTab === "assets" && "자산 및 부채 (Asset & Trend Analysis)"}
+              {activeTab === "report" && "가계부 및 앱 개선 리포트"}
             </h2>
           </div>
         </header>
@@ -2439,22 +2302,19 @@ ${question}`;
         <div className="p-8 flex-1 overflow-y-auto space-y-8" id="tab_contents">
           
           {/* ==========================================
-              TAB 1: ?? 총괄 대시보드 (Overview)
+              TAB 1: 총괄 대시보드 (Overview)
              ========================================== */}
           {activeTab === "overview" && (
             <div className="space-y-8" id="overview_tab">
               
-              {/* Premium AI Wealth Report Panel */}
-              {renderAiReport()}
-              
-              {/* ?? [이달의 재무 브리핑] 신규 세션 추가 */}
+              {/* [이달의 재무 브리핑] 신규 세션 추가 */}
               {(() => {
                 const briefing = calculateMonthlyBriefing(selectedMonth);
                 return (
                   <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6" id="monthly_financial_briefing_card">
                     <div>
                       <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">??</span>
+                        <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg"><BarChart2 className="w-4 h-4" /></span>
                         <span>[이달의 재무 브리핑] - {selectedMonth.replace("-", "년 ")}월 지출 분석 및 진단</span>
                       </h3>
                       <p className="text-xs sm:text-sm text-slate-400 mt-1">
@@ -2464,13 +2324,13 @@ ${question}`;
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div className="bg-rose-50/30 rounded-2xl border border-rose-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-2">?? {selectedMonth.replace("-", "년 ")}월 총 지출액</span>
+                        <span className="text-xs font-bold text-slate-500 mb-2">{selectedMonth.replace("-", "년 ")}월 총 지출액</span>
                         <strong className="text-2xl font-mono text-rose-600 font-black">
                           {briefing.totalExpense.toLocaleString()} 원
                         </strong>
                       </div>
                       <div className="bg-blue-50/30 rounded-2xl border border-blue-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">?? 고정비 비중</span>
+                        <span className="text-xs font-bold text-slate-500 mb-1">고정비 비중</span>
                         <strong className="text-2xl font-mono text-blue-700 font-black">
                           {briefing.fixedRatio.toFixed(1)}%
                         </strong>
@@ -2479,7 +2339,7 @@ ${question}`;
                         </span>
                       </div>
                       <div className="bg-amber-50/30 rounded-2xl border border-amber-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">?? 변동비 비중</span>
+                        <span className="text-xs font-bold text-slate-500 mb-1">변동비 비중</span>
                         <strong className="text-2xl font-mono text-amber-700 font-black">
                           {briefing.variableRatio.toFixed(1)}%
                         </strong>
@@ -2491,7 +2351,7 @@ ${question}`;
 
                     <div className="bg-blue-50/40 border-l-4 border-blue-500 p-4 rounded-r-2xl shadow-xs">
                       <span className="font-bold text-blue-800 text-sm flex items-center gap-1.5">
-                        ?? 실시간 재정 분석 리포트 (Financial Insights)
+                        실시간 재정 분석 리포트 (Financial Insights)
                       </span>
                       <p className="text-slate-700 text-xs sm:text-sm leading-relaxed mt-2 font-medium">
                         {briefing.summaryText.replace(/\*\*/g, "")}
@@ -2506,7 +2366,7 @@ ${question}`;
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-100 pb-5 gap-4">
                   <div>
                     <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                      <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">??</span>
+                      <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg"><DollarSign className="w-4 h-4" /></span>
                       <span>월별 가계 수입 및 지출 종합 현황</span>
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-400 mt-1">
@@ -2694,7 +2554,7 @@ ${question}`;
                 }`}>
                   <div className="space-y-0.5">
                     <p className="text-xs sm:text-sm font-bold flex items-center gap-1.5">
-                      {netMonthlyIncome >= 0 ? "?? 당월 종합 재정 건전성: 흑자" : "?? 당월 종합 재정 건전성: 적자 모니터링"}
+                      {netMonthlyIncome >= 0 ? "당월 종합 재정 건전성: 흑자" : "당월 종합 재정 건전성: 적자 모니터링"}
                     </p>
                     <p className="text-[11px] text-slate-500">
                       {netMonthlyIncome >= 0
@@ -2719,7 +2579,7 @@ ${question}`;
                 {/* Card 1: Total Assets */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_assets">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? 가계 총 자산</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">가계 총 자산</span>
                     <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">예적금+투자</span>
                   </div>
                   <div className="mt-4">
@@ -2733,7 +2593,7 @@ ${question}`;
                 {/* Card 2: Total Debt */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_liabilities">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? 총 부채 (대출)</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">총 부채 (대출)</span>
                     <span className="bg-rose-50 text-rose-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">NH주담대</span>
                   </div>
                   <div className="mt-4">
@@ -2751,11 +2611,11 @@ ${question}`;
                     : "bg-white border-slate-200"
                 }`} id="kpi_card_net_worth">
                   <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">?? 순금융자산</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">순금융자산</span>
                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold ${
                       netWorth < 0 ? "bg-rose-100 text-rose-800" : "bg-emerald-100 text-emerald-800"
                     }`}>
-                      {netWorth < 0 ? "?? 레버리지" : "순자산 흑자"}
+                      {netWorth < 0 ? "레버리지" : "순자산 흑자"}
                     </span>
                   </div>
                   <div className="mt-4">
@@ -2788,115 +2648,13 @@ ${question}`;
                 </div>
               )}
 
-              {/* TWO PANEL INTERACTIVE SECTION */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8" id="two_panel_section">
-                
-                {/* Left Panel: Checklist (Direct Checklist state) */}
-                <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-6" id="interactive_checklist_panel">
-                  <div className="flex justify-between items-center border-b border-slate-100 pb-4">
-                    <div>
-                      <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                        <CheckSquare className="w-5 h-5 text-emerald-600" />
-                        <span>?? 이번 달 주요 재정 체크리스트</span>
-                      </h4>
-                      <p className="text-[11px] text-slate-400">이번 달 챙겨야 할 핵심 가계 이체 및 운용 업무</p>
-                    </div>
-                    
-                    {/* Mission completion rate badge */}
-                    <div className="text-right">
-                      <span className="text-[10px] font-mono font-bold bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg text-slate-700">
-                        완료: {checklist.filter(c => c.done).length}/{checklist.length}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Tasks List */}
-                  <div className="space-y-3" id="checklist_items">
-                    {checklist.length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">체크리스트 항목이 없습니다. 아래에서 추가해 보세요.</p>
-                    ) : (
-                      checklist.map((item) => (
-                        <div
-                          key={item.id}
-                          className={`flex items-center space-x-3.5 p-4 rounded-2xl border transition-all ${
-                            item.done
-                              ? "bg-emerald-50/30 border-emerald-100 text-slate-400"
-                              : "bg-slate-50 border-slate-200 text-slate-800 hover:bg-slate-100/50"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={item.done}
-                            onChange={() => handleToggleChecklistItem(item.id)}
-                            className="w-4.5 h-4.5 rounded text-emerald-600 border-slate-300 accent-emerald-500 shrink-0 cursor-pointer"
-                          />
-                          <input
-                            type="text"
-                            value={item.label}
-                            onChange={(e) => handleChecklistLabelChange(item.id, e.target.value)}
-                            onBlur={() => handleChecklistLabelBlur(item.id)}
-                            className={`flex-1 min-w-0 bg-transparent text-xs sm:text-sm font-semibold leading-normal focus:outline-none focus:underline ${item.done ? "line-through" : ""}`}
-                          />
-                          <button
-                            onClick={() => handleDeleteChecklistItem(item.id)}
-                            className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-white transition-colors cursor-pointer shrink-0"
-                            title="항목 삭제"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))
-                    )}
-                  </div>
-
-                  {/* Add new checklist item */}
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      const input = e.currentTarget.elements.namedItem("newChecklistLabel") as HTMLInputElement;
-                      handleAddChecklistItem(input.value);
-                      input.value = "";
-                    }}
-                    className="flex gap-2"
-                  >
-                    <input
-                      name="newChecklistLabel"
-                      type="text"
-                      placeholder="새 체크리스트 항목 추가..."
-                      className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                    <button
-                      type="submit"
-                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shrink-0 cursor-pointer"
-                    >
-                      추가
-                    </button>
-                  </form>
-
-                  {/* Progress Bar */}
-                  <div className="space-y-1.5 pt-2">
-                    <div className="flex justify-between text-xs text-slate-500">
-                      <span>미션 달성률</span>
-                      <span className="font-bold text-slate-800">
-                        {checklist.length > 0 ? Math.round((checklist.filter(c => c.done).length / checklist.length) * 100) : 0}%
-                      </span>
-                    </div>
-                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                      <div
-                        className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
-                        style={{ width: `${checklist.length > 0 ? (checklist.filter(c => c.done).length / checklist.length) * 100 : 0}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Panel: NH Mortgage Specs */}
+              <div className="grid grid-cols-1 gap-8" id="mortgage_summary_section">
                 <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between space-y-6" id="mortgage_detail_panel">
                   <div className="space-y-4">
                     <div className="border-b border-slate-100 pb-4">
                       <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                         <CreditCard className="w-5 h-5 text-emerald-600" />
-                        <span>?? NH 주택담보대출 스펙</span>
+                        <span>NH 주택담보대출 스펙</span>
                       </h4>
                       <p className="text-[11px] text-slate-400">농협은행 주택 구입 자금 대출 정보</p>
                     </div>
@@ -2945,7 +2703,7 @@ ${question}`;
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4" id="gemini_chatbot_panel">
                 <div>
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">??</span>
+                    <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg"><HelpCircle className="w-4 h-4" /></span>
                     <span>Gemini 데이터 분석 챗봇</span>
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
@@ -3004,7 +2762,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 2: ?? 지출과 수입 (Interactive Ledger)
+              TAB 2: 지출과 수입 (Interactive Ledger)
              ========================================== */}
           {activeTab === "ledger" && (
             <div className="space-y-8" id="ledger_tab">
@@ -3012,7 +2770,7 @@ ${question}`;
               {/* Explanatory Card */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-2" id="ledger_intro">
                 <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span>??</span> 월별 가계부 지출·수입 유효반영 제어기
+                  월별 가계부 지출·수입 유효반영 제어기
                 </h3>
                 <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
                   각 행 왼쪽의 <strong>'유효반영' 체크박스</strong>를 끄거나 켬으로써 실제 가계 운용 결과에 합산할지 여부를 실시간으로 선택할 수 있습니다. 
@@ -3025,7 +2783,7 @@ ${question}`;
                 <div className="space-y-3 w-full md:w-auto">
                   <div className="flex items-center justify-between md:justify-start gap-4">
                     <span className="text-xs sm:text-sm font-bold text-slate-700 flex items-center gap-1.5">
-                      <span>??</span> 조회 모드:
+                      조회 모드:
                     </span>
                     <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner">
                       <button
@@ -3154,7 +2912,7 @@ ${question}`;
                   <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                     <h4 className="font-bold text-emerald-700 flex items-center space-x-2 text-xs sm:text-sm">
                       <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-                      <span>?? 수입 내역 리스트</span>
+                      <span>수입 내역 리스트</span>
                     </h4>
                     <span className="text-[10px] bg-emerald-50 text-emerald-800 px-2.5 py-0.5 rounded-full font-bold">
                       총 {scopedIncomeItems.length}건
@@ -3171,7 +2929,7 @@ ${question}`;
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
                             <div className="text-[10px] font-black text-emerald-700 uppercase tracking-wider bg-emerald-50/60 rounded-lg px-2 py-1">
-                              ?? {group.label} ({group.items.length}건)
+                              {group.label} ({group.items.length}건)
                             </div>
                           )}
                           {group.items.map((item, itemIdx) => (
@@ -3260,7 +3018,7 @@ ${question}`;
                   <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                     <h4 className="font-bold text-rose-700 flex items-center space-x-2 text-xs sm:text-sm">
                       <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
-                      <span>?? 지출 내역 리스트</span>
+                      <span>지출 내역 리스트</span>
                     </h4>
                     <span className="text-[10px] bg-rose-50 text-rose-800 px-2.5 py-0.5 rounded-full font-bold">
                       총 {scopedExpenseItems.length}건
@@ -3277,7 +3035,7 @@ ${question}`;
                         <div key={group.label ?? `date-${gi}`} className="space-y-2">
                           {group.label && (
                             <div className="text-[10px] font-black text-rose-700 uppercase tracking-wider bg-rose-50/60 rounded-lg px-2 py-1">
-                              ?? {group.label} ({group.items.length}건)
+                              {group.label} ({group.items.length}건)
                             </div>
                           )}
                           {group.items.map((item, itemIdx) => (
@@ -3366,13 +3124,13 @@ ${question}`;
               {/* DYNAMIC SUM TOTALS BOX */}
               <div className="bg-white rounded-3xl border border-slate-200 shadow-md p-6 space-y-6" id="ledger_totals_box">
                 <h4 className="text-xs font-bold uppercase tracking-widest text-slate-500 border-b border-slate-100 pb-3">
-                  ?? {selectedMonth.replace("-", "년 ")}월 유효 계산 메트릭 (실시간 리액티브 결과)
+                  {selectedMonth.replace("-", "년 ")}월 유효 계산 메트릭 (실시간 리액티브 결과)
                 </h4>
                 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-between items-center">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">?? 선택 수입 총합</span>
+                      <span className="text-[10px] text-slate-500 block">선택 수입 총합</span>
                       <strong className="text-lg sm:text-xl font-mono text-emerald-600">
                         {activeIncomeTotal.toLocaleString()}원
                       </strong>
@@ -3382,7 +3140,7 @@ ${question}`;
 
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-between items-center">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">?? 선택 지출 총합</span>
+                      <span className="text-[10px] text-slate-500 block">선택 지출 총합</span>
                       <strong className="text-lg sm:text-xl font-mono text-slate-900">
                         {activeExpenseTotal.toLocaleString()}원
                       </strong>
@@ -3396,7 +3154,7 @@ ${question}`;
                       : "bg-rose-50/40 border-rose-200"
                   }`}>
                     <div>
-                      <span className="text-[10px] text-slate-500 block">?? 당월 최종 순수입 (잉여)</span>
+                      <span className="text-[10px] text-slate-500 block">당월 최종 순수입 (잉여)</span>
                       <strong className={`text-lg sm:text-xl font-mono ${
                         netMonthlyIncome >= 0 ? "text-emerald-700" : "text-rose-700"
                       }`}>
@@ -3410,7 +3168,7 @@ ${question}`;
                         </span>
                       ) : (
                         <span className="text-[10px] sm:text-xs text-rose-700 font-bold bg-rose-100 px-2.5 py-1 rounded-md block">
-                          ?? 비상 예비비 사용
+                          비상 예비비 사용
                         </span>
                       )}
                     </div>
@@ -3422,7 +3180,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 2.5: ?? 재무적 지출 분석 (Financial Expense Analysis)
+              TAB 2.5: 재무적 지출 분석 (Financial Expense Analysis)
              ========================================== */}
           {activeTab === "analysis" && (
             <div className="space-y-8" id="financial_expense_analysis_tab">
@@ -3431,7 +3189,7 @@ ${question}`;
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
                   <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                    <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">??</span>
+                    <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg"><PieChart className="w-4 h-4" /></span>
                     <span>재무적 지출 세부 분석</span>
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
@@ -3473,12 +3231,12 @@ ${question}`;
 
                           <div className="grid grid-cols-2 gap-4 mb-6">
                             <div className="bg-blue-50/40 p-4 rounded-2xl border border-blue-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 고정비 합계</span>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">고정비 합계</span>
                               <strong className="text-base sm:text-lg font-mono text-blue-700 block">{briefing.fixedSum.toLocaleString()}원</strong>
                               <span className="text-xs font-black text-blue-500 bg-white border border-blue-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.fixedRatio.toFixed(1)}%</span>
                             </div>
                             <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 변동비 합계</span>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">변동비 합계</span>
                               <strong className="text-base sm:text-lg font-mono text-amber-700 block">{briefing.variableSum.toLocaleString()}원</strong>
                               <span className="text-xs font-black text-amber-500 bg-white border border-amber-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.variableRatio.toFixed(1)}%</span>
                             </div>
@@ -3510,12 +3268,12 @@ ${question}`;
 
                           <div className="grid grid-cols-2 gap-4 mb-6">
                             <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 식비 점유비</span>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">식비 점유비</span>
                               <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{briefing.foodSum.toLocaleString()}원</strong>
                               <span className="text-xs font-black text-emerald-600 bg-white border border-emerald-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.foodRatio.toFixed(1)}%</span>
                             </div>
                             <div className="bg-rose-50/40 p-4 rounded-2xl border border-rose-100/30 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block mb-1">??? 보험료/금융 점유비</span>
+                              <span className="text-[10px] text-slate-400 font-bold block mb-1">보험료/금융 점유비</span>
                               <strong className="text-base sm:text-lg font-mono text-rose-700 block">{briefing.insuranceSum.toLocaleString()}원</strong>
                               <span className="text-xs font-black text-rose-500 bg-white border border-rose-100 px-2 py-0.5 rounded-full inline-block mt-1.5">{briefing.insuranceRatio.toFixed(1)}%</span>
                             </div>
@@ -3531,7 +3289,7 @@ ${question}`;
                     {/* ③ 재무 분석 요약 리포트 */}
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4">
                       <h4 className="font-bold text-slate-900 text-base flex items-center gap-1.5">
-                        <span className="p-1 bg-blue-50 text-blue-600 rounded flex items-center justify-center w-6 h-6">??</span>
+                        <span className="p-1 bg-blue-50 text-blue-600 rounded flex items-center justify-center w-6 h-6"><BarChart2 className="w-4 h-4" /></span>
                         <span>③ 재무 분석 요약 리포트 (Financial Insights)</span>
                       </h4>
                       <p className="text-xs text-slate-400 leading-relaxed">
@@ -3550,7 +3308,7 @@ ${question}`;
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-5" id="expense_category_drilldown">
                       <div>
                         <h4 className="font-bold text-slate-900 text-base flex items-center gap-1.5">
-                          <span className="p-1 bg-emerald-50 text-emerald-600 rounded flex items-center justify-center w-6 h-6">??</span>
+                          <span className="p-1 bg-emerald-50 text-emerald-600 rounded flex items-center justify-center w-6 h-6"><TrendingUp className="w-4 h-4" /></span>
                           <span>④ 카테고리별 상세 지출 드릴다운</span>
                         </h4>
                         <p className="text-xs text-slate-400 mt-1">
@@ -3586,15 +3344,15 @@ ${question}`;
 
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                               <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 총 지출 금액</span>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">총 지출 금액</span>
                                 <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{filteredTotal.toLocaleString()}원</strong>
                               </div>
                               <div className="bg-blue-50/40 p-4 rounded-2xl border border-blue-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 건수</span>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">건수</span>
                                 <strong className="text-base sm:text-lg font-mono text-blue-700 block">{filteredItems.length}건</strong>
                               </div>
                               <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                                <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 전체 지출 대비 비중</span>
+                                <span className="text-[10px] text-slate-400 font-bold block mb-1">전체 지출 대비 비중</span>
                                 <strong className="text-base sm:text-lg font-mono text-amber-700 block">{filteredRatio.toFixed(1)}%</strong>
                               </div>
                             </div>
@@ -3621,7 +3379,7 @@ ${question}`;
 
                               return (
                                 <div className="space-y-3" id="drilldown_category_trend">
-                                  <h5 className="text-xs font-bold text-slate-600">?? "{selectedCat}" 카테고리 최근 6개월 지출 추이</h5>
+                                  <h5 className="text-xs font-bold text-slate-600">"{selectedCat}" 카테고리 최근 6개월 지출 추이</h5>
                                   <div className="overflow-x-auto">
                                     <table className="w-full min-w-[480px] text-xs sm:text-sm">
                                       <thead>
@@ -3714,7 +3472,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 3: ?? 자산 및 부채 (Asset & Trend Analysis)
+              TAB 3: 자산 및 부채 (Asset & Trend Analysis)
              ========================================== */}
           {activeTab === "assets" && (
             <div className="space-y-8" id="analysis_tab">
@@ -3779,7 +3537,7 @@ ${question}`;
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 border-b border-white/10 pb-6">
                       <div className="space-y-1">
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest inline-block">
-                          Assets & Wealth Status ??
+                          Assets & Wealth Status
                         </span>
                         <h3 className="text-xl sm:text-2xl font-black text-white">
                           우리집 현재 통합 금융 자산 및 변동 추이
@@ -3804,7 +3562,7 @@ ${question}`;
                       <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
                         <div>
                           <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">?? 자유입출금 자산</span>
+                            <span className="text-[10px] text-slate-400 font-bold">자유입출금 자산</span>
                             <button
                               onClick={() => toggleAssetExpand("free")}
                               className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
@@ -3845,7 +3603,7 @@ ${question}`;
                       <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
                         <div>
                           <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">?? 주식 및 투자자산</span>
+                            <span className="text-[10px] text-slate-400 font-bold">주식 및 투자자산</span>
                             <button
                               onClick={() => toggleAssetExpand("investment")}
                               className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
@@ -3897,7 +3655,7 @@ ${question}`;
                     {/* Net Worth Alert Block */}
                     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 text-xs">
                       <div>
-                        <span className="text-slate-400 font-bold block">?? 총 부채 차감 후 순금융자산</span>
+                        <span className="text-slate-400 font-bold block">총 부채 차감 후 순금융자산</span>
                         <p className="text-[11px] text-slate-500 mt-0.5">
                           NH농협은행 주택담보대출 이자 및 원금 ({totalLiabilities.toLocaleString()}원)을 제외한 순수한 금융 자산가치입니다.
                         </p>
@@ -3915,7 +3673,7 @@ ${question}`;
                         <div>
                           <h4 className="text-sm sm:text-base font-bold text-white flex items-center space-x-2">
                             <span className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></span>
-                            <span>?? 월별 총 금융자산 변동 비교</span>
+                            <span>월별 총 금융자산 변동 비교</span>
                           </h4>
                           <p className="text-xs text-slate-400 mt-1">
                             업로드된 월별 자산 snapshot을 각각 독립적으로 비교합니다.
@@ -4042,7 +3800,7 @@ ${question}`;
                       )}
 
                       <div className="text-[11px] text-slate-400 text-center font-bold bg-white/5 py-2.5 rounded-xl border border-white/5">
-                        ?? <span className="text-emerald-300 font-extrabold">실시간 피드백:</span> 가계부 탭에서 각 행의 활성/비활성 상태를 변경하면, 선택한 월들의 자산 추정치가 즉시 다시 계산됩니다!
+                        <span className="text-emerald-300 font-extrabold">실시간 피드백:</span> 가계부 탭에서 각 행의 활성/비활성 상태를 변경하면, 선택한 월들의 자산 추정치가 즉시 다시 계산됩니다!
                       </div>
                     </div>
                   </div>
@@ -4057,7 +3815,7 @@ ${question}`;
                   <div>
                     <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                       <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>?? 예적금·현금성 vs 투자성 자산 비율</span>
+                      <span>예적금·현금성 vs 투자성 자산 비율</span>
                     </h4>
                     <p className="text-xs text-slate-400">우리 가계의 금융 포트폴리오 안전성 현황</p>
                   </div>
@@ -4140,7 +3898,7 @@ ${question}`;
                   <div>
                     <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                       <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>?? 주요 주식 종목 평가 (투자 원금 대비 수익 현황)</span>
+                      <span>주요 주식 종목 평가 (투자 원금 대비 수익 현황)</span>
                     </h4>
                     <p className="text-xs text-slate-400">등록된 투자 자산 종목별 원금 대비 평가 금액과 수익률입니다.</p>
                   </div>
@@ -4202,7 +3960,7 @@ ${question}`;
                 <div className="border-b border-slate-100 pb-4">
                   <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
                     <CreditCard className="w-5 h-5 text-emerald-600" />
-                    <span>?? {LIABILITY_MORTGAGE.name} 상환 기록</span>
+                    <span>{LIABILITY_MORTGAGE.name} 상환 기록</span>
                   </h4>
                   <p className="text-xs text-slate-400">
                     상환할 때마다 그 회차의 이자(남은 원금 × 월 이자율)를 먼저 계산하고, 나머지가 원금을 줄이는 방식으로 잔액과 누적 이자를 순차 재계산합니다.
@@ -4228,15 +3986,15 @@ ${question}`;
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="bg-rose-50/40 p-4 rounded-2xl border border-rose-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 현재 남은 원금</span>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">현재 남은 원금</span>
                           <strong className="text-base sm:text-lg font-mono text-rose-700 block">{Math.round(remainingBalance).toLocaleString()}원</strong>
                         </div>
                         <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 누적 원금 상환액</span>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">누적 원금 상환액</span>
                           <strong className="text-base sm:text-lg font-mono text-emerald-700 block">{Math.round(totalPrincipalPaid).toLocaleString()}원</strong>
                         </div>
                         <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/30 text-center">
-                          <span className="text-[10px] text-slate-400 font-bold block mb-1">?? 누적 납부 이자</span>
+                          <span className="text-[10px] text-slate-400 font-bold block mb-1">누적 납부 이자</span>
                           <strong className="text-base sm:text-lg font-mono text-amber-700 block">{Math.round(totalInterestPaid).toLocaleString()}원</strong>
                         </div>
                       </div>
@@ -4376,7 +4134,7 @@ ${question}`;
                     <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6">
                       <div>
                         <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                          <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">??</span>
+                          <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg"><Check className="w-4 h-4" /></span>
                           <span>재무 체질 개선 리포트</span>
                         </h3>
                         <p className="text-xs sm:text-sm text-slate-400 mt-1">
