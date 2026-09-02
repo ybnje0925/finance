@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,7 +26,6 @@ import {
 import { read, utils } from "xlsx";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
-import { emptySyncStatus, loadRemoteFinanceState, type SyncStatus } from "./remoteFinance";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment, AssetSnapshot } from "./types";
 import { 
   MOVE_IN_DATE,
@@ -71,9 +70,16 @@ const getAssetSheetMonthKey = (sheetName: string, fallbackYear: number) => {
   return `${year}-${String(month).padStart(2, "0")}`;
 };
 
-const getOwnerPrefixFromSheetName = (sheetName: string) => {
-  if (sheetName.includes("\uC601\uBC94")) return "[\uC601\uBC94] ";
-  if (sheetName.includes("\uC7AC\uC740")) return "[\uC7AC\uC740] ";
+const getAssetMonthKeyFromText = (text: string, fallbackYear: number) => {
+  const compactMatch = text.match(/(20\d{2})[-_.\s]?(0[1-9]|1[0-2])/);
+  if (compactMatch) return `${compactMatch[1]}-${compactMatch[2]}`;
+  return getAssetSheetMonthKey(text, fallbackYear);
+};
+
+const getOwnerPrefixFromAssetSource = (sourceName: string) => {
+  const normalized = sourceName.toLowerCase();
+  if (sourceName.includes("\uC601\uBC94") || /\byb\b/.test(normalized) || normalized.includes("(asset)yb") || normalized.includes("youngbeom")) return "[\uC601\uBC94] ";
+  if (sourceName.includes("\uC7AC\uC740") || /\bje\b/.test(normalized) || normalized.includes("(asset)je") || normalized.includes("jaeeun")) return "[\uC7AC\uC740] ";
   return "";
 };
 
@@ -199,7 +205,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "analysis" | "assets" | "report">("overview");
   const [ledgerFileName, setLedgerFileName] = useState<string | null>(null);
   const [assetsFileName, setAssetsFileName] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySyncStatus);
   const authGateEnabled = isSupabaseConfigured && import.meta.env.PROD;
   const [cloudDataLoading, setCloudDataLoading] = useState<boolean>(false);
   const [cloudSaveError, setCloudSaveError] = useState("");
@@ -755,54 +760,6 @@ export default function App() {
     localStorage.setItem("VIVALDI_INVESTMENT_ASSETS", JSON.stringify(investmentAssets));
   }, [investmentAssets]);
 
-  useEffect(() => {
-    if (!supabase) {
-      setSyncStatus(emptySyncStatus);
-      return;
-    }
-
-    let cancelled = false;
-
-    const applyRemoteState = async () => {
-      try {
-        const remoteState = await loadRemoteFinanceState(supabase);
-        if (cancelled) return;
-
-        setLedger(remoteState.ledger);
-        setFreeAssets(remoteState.freeAssets);
-        setSavingsAssets([]);
-        setElectronicAssets([]);
-        setInvestmentAssets(remoteState.investmentAssets);
-        setLedgerFileName("Supabase: income_expenses");
-        setAssetsFileName("Supabase: assets_youngbeom + assets_jaeeun");
-        setSyncStatus(remoteState.syncStatus);
-      } catch (error: any) {
-        console.error("[Supabase remote finance sync]", error);
-        if (!cancelled) {
-          setSyncStatus({
-            ...emptySyncStatus,
-            connected: false,
-            statusText: error?.message || "Supabase sync failed",
-          });
-        }
-      }
-    };
-
-    applyRemoteState();
-
-    const channel = supabase
-      .channel("remote_finance_sync_pipeline")
-      .on("postgres_changes", { event: "*", schema: "public", table: "income_expenses" }, applyRemoteState)
-      .on("postgres_changes", { event: "*", schema: "public", table: "assets_youngbeom" }, applyRemoteState)
-      .on("postgres_changes", { event: "*", schema: "public", table: "assets_jaeeun" }, applyRemoteState)
-      .subscribe();
-
-    return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
   const assetMonths = Object.keys(assetSnapshots).sort();
   const latestAssetMonth = assetMonths[assetMonths.length - 1] || "";
 
@@ -918,9 +875,9 @@ export default function App() {
     }
   }, [ledger, uniqueMonths, selectedMonth]);
 
-  // 지출 내역을 날짜순(있는 그대로) 또는 지출자별로 묶어서 보여준다.
+  // 지출 내역을 날짜순/금액순은 그대로, 지출자별은 그룹으로 보여준다.
   const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
-    if (ledgerSortMode === "date") {
+    if (ledgerSortMode !== "spender") {
       return [{ label: null, items }];
     }
     const groups = new Map<string, LedgerItem[]>();
@@ -1129,8 +1086,8 @@ export default function App() {
         electronicAssets,
         investmentAssets,
         mortgage: { name: LIABILITY_MORTGAGE.name, amount: LIABILITY_MORTGAGE.amount, rate: LIABILITY_MORTGAGE.rate },
-        youngbeomTotal: syncStatus.youngbeomTotal,
-        jaeeunTotal: syncStatus.jaeeunTotal,
+        youngbeomTotal: [...freeAssets, ...savingsAssets, ...electronicAssets].reduce((sum, item) => parseAssetOwner(item.name) === "영범" ? sum + item.amount : sum, 0) + investmentAssets.reduce((sum, item) => parseAssetOwner(item.name) === "영범" ? sum + item.appraised : sum, 0),
+        jaeeunTotal: [...freeAssets, ...savingsAssets, ...electronicAssets].reduce((sum, item) => parseAssetOwner(item.name) === "재은" ? sum + item.amount : sum, 0) + investmentAssets.reduce((sum, item) => parseAssetOwner(item.name) === "재은" ? sum + item.appraised : sum, 0),
         totalAssets,
         netWorth
       };
@@ -1375,73 +1332,81 @@ ${question}`;
     reader.readAsBinaryString(file);
   };
 
-  const handleAssetsExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleAssetsExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
+    const readAssetFile = (file: File) => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = evt => resolve(String(evt.target?.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("자산 파일을 읽지 못했습니다."));
+      reader.readAsBinaryString(file);
+    });
+
+    try {
+      const fallbackAssetYear = Number((uniqueMonths[uniqueMonths.length - 1] || selectedMonth || String(new Date().getFullYear())).slice(0, 4)) || new Date().getFullYear();
+      const parsedAssetSnapshots: Record<string, AssetSnapshot> = {};
+      let assetsSuccessCount = 0;
+      let anySheetParsed = false;
+
+      const getWritableSnapshot = (monthKey: string) => {
+        if (!parsedAssetSnapshots[monthKey]) parsedAssetSnapshots[monthKey] = emptyAssetSnapshot();
+        return parsedAssetSnapshots[monthKey];
+      };
+
+      const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null) => {
+        const snapshot = getWritableSnapshot(monthKey);
+        free.forEach(f => {
+          const existingIdx = snapshot.freeAssets.findIndex(existing => existing.name === f.name);
+          if (existingIdx === -1) snapshot.freeAssets.push(f);
+          else snapshot.freeAssets[existingIdx] = f;
+        });
+        investments.forEach(inv => {
+          const existingIdx = snapshot.investmentAssets.findIndex(existing => existing.name === inv.name);
+          if (existingIdx === -1) snapshot.investmentAssets.push(inv);
+          else snapshot.investmentAssets[existingIdx] = inv;
+        });
+        if (mortgageAmount) {
+          snapshot.liability = { amount: mortgageAmount, rate: mortgageRate ?? snapshot.liability?.rate ?? null };
+        } else if (mortgageRate) {
+          snapshot.liability = { amount: snapshot.liability?.amount ?? LIABILITY_MORTGAGE.amount, rate: mortgageRate };
+        }
+      };
+
+      const toNumber = (value: unknown) => {
+        if (typeof value === "number") return Math.round(Math.abs(value));
+        return Math.round(Math.abs(parseFloat(String(value ?? "").replace(/[^0-9.-]/g, "")) || 0));
+      };
+
+      const genericAssetSheetKeywords = ["현황", "자산", "재무", "뱅샐", "고객", "asset"];
+
+      for (const file of files) {
+        const bstr = await readAssetFile(file);
         const wb = read(bstr, { type: "binary" });
-
-        const fallbackAssetYear = Number((uniqueMonths[uniqueMonths.length - 1] || selectedMonth || String(new Date().getFullYear())).slice(0, 4)) || new Date().getFullYear();
-        const parsedAssetSnapshots: Record<string, AssetSnapshot> = {};
-
-        const getWritableSnapshot = (monthKey: string) => {
-          if (!parsedAssetSnapshots[monthKey]) parsedAssetSnapshots[monthKey] = emptyAssetSnapshot();
-          return parsedAssetSnapshots[monthKey];
-        };
-
-        const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null) => {
-          const snapshot = getWritableSnapshot(monthKey);
-          free.forEach(f => {
-            if (!snapshot.freeAssets.some(existing => existing.name === f.name)) snapshot.freeAssets.push(f);
-          });
-          investments.forEach(inv => {
-            const existingIdx = snapshot.investmentAssets.findIndex(existing => existing.name === inv.name);
-            if (existingIdx === -1) snapshot.investmentAssets.push(inv);
-            else snapshot.investmentAssets[existingIdx] = inv;
-          });
-          if (mortgageAmount) {
-            snapshot.liability = { amount: mortgageAmount, rate: mortgageRate ?? snapshot.liability?.rate ?? null };
-          } else if (mortgageRate) {
-            snapshot.liability = { amount: snapshot.liability?.amount ?? LIABILITY_MORTGAGE.amount, rate: mortgageRate };
-          }
-        };
-
-        let assetsSuccessCount = 0;
-        let anySheetParsed = false;
-
-        const genericAssetSheetKeywords = ["현황", "자산", "재무", "뱅샐", "고객", "asset"];
+        const fileMonthKey = getAssetMonthKeyFromText(file.name, fallbackAssetYear);
+        const fileOwnerPrefix = getOwnerPrefixFromAssetSource(file.name);
 
         for (const wsname of wb.SheetNames) {
           const ws = wb.Sheets[wsname];
           const rows = utils.sheet_to_json<any[]>(ws, { header: 1 });
           if (!rows || rows.length === 0) continue;
 
+          const sourceName = `${file.name} ${wsname}`;
           const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
           const textContent = rows.map(r => r.join(" ")).join("\n").toLowerCase();
-          const sheetMonthKey = getAssetSheetMonthKey(wsname, fallbackAssetYear) || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
-
-          // 뱅샐현황(영범)8월처럼 월별/명의별 시트면 월과 명의를 분리해 저장한다.
-          const ownerTag = getOwnerPrefixFromSheetName(wsname) || (isAssetsSheetName ? "" : `[${wsname}] `);
+          const sheetMonthKey = getAssetMonthKeyFromText(sourceName, fallbackAssetYear) || fileMonthKey || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+          const ownerTag = getOwnerPrefixFromAssetSource(sourceName) || fileOwnerPrefix || (isAssetsSheetName ? "" : `[${wsname}] `);
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
             let parsedStructured = false;
 
             if (textContent.includes("고객정보") || textContent.includes("재무현황") || textContent.includes("투자현황") || textContent.includes("대출현황")) {
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
-              const newInvestments: typeof ASSET_INVESTMENTS = [];
+              const investMap = new Map<string, InvestmentItem>();
               let mortgageAmount: number | null = null;
               let mortgageRate: number | null = null;
-
-              let currentCategory = "";
-
-              // "N.재무현황" 표 헤더(항목/상품명/금액이 자산·부채 두 블록으로 나란히 배치됨)를 찾는다.
-              // 항목(구분) 값은 각 카테고리의 첫 행에만 표시되고 이후 행은 공란이므로,
-              // 반드시 "마지막으로 읽은 항목 값"을 다음 행에 이어받아야(carry-forward) 각 카테고리의 첫 행을 놓치지 않는다.
               let assetHeaderRowIdx = -1;
+
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
@@ -1453,8 +1418,6 @@ ${question}`;
                   break;
                 }
               }
-
-              const investMap = new Map<string, InvestmentItem>();
 
               if (assetHeaderRowIdx !== -1) {
                 const headerRow = rows[assetHeaderRowIdx];
@@ -1474,7 +1437,7 @@ ${question}`;
                 const liabItemCol = itemCols[1];
                 const liabNameCol = nameCols[1];
                 const liabAmountCol = amountCols[1];
-
+                let currentCategory = "";
                 let currentLiabCategory = "";
 
                 for (let r = assetHeaderRowIdx + 1; r < rows.length; r++) {
@@ -1483,53 +1446,35 @@ ${question}`;
 
                   if (assetItemCol !== undefined) {
                     const itemCell = row[assetItemCol];
-                    if (typeof itemCell === "string" && itemCell.trim().length > 0) {
-                      currentCategory = itemCell.trim();
-                    }
-
-                    if (currentCategory.includes("총자산")) {
-                      break;
-                    }
+                    if (typeof itemCell === "string" && itemCell.trim().length > 0) currentCategory = itemCell.trim();
+                    if (currentCategory.includes("총자산")) break;
 
                     const nameCell = assetNameCol !== undefined ? row[assetNameCol] : undefined;
                     const amountCell = assetAmountCol !== undefined ? row[assetAmountCol] : undefined;
-
-                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && typeof amountCell === "number") {
+                    if (typeof nameCell === "string" && nameCell.trim().length > 0 && amountCell !== undefined) {
                       const name = ownerTag + nameCell.trim();
-                      // 원 단위는 소수점이 없어야 하므로(은행 export의 반올림 잔여값 등으로 소수점이 붙는 경우가 있음) 정수로 반올림한다.
-                      const amount = Math.round(Math.abs(amountCell));
-
+                      const amount = toNumber(amountCell);
+                      if (!amount) continue;
                       if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
-                        if (!newFree.some(f => f.name === name)) {
-                          newFree.push({ name, amount });
-                        }
+                        newFree.push({ name, amount });
                       } else if (currentCategory.includes("투자성") || currentCategory.includes("주식")) {
-                        if (!investMap.has(name)) {
-                          investMap.set(name, { name, principal: amount, appraised: amount, yieldRate: 0 });
-                        }
+                        investMap.set(name, { name, principal: amount, appraised: amount, yieldRate: 0 });
                       }
-                      // 보험 자산 / 연금 자산 / 부동산 / 동산 / 기타 실물 자산 / 신탁 자산은 현금성·투자성 자산이 아니므로 제외
                     }
                   }
 
                   if (liabItemCol !== undefined) {
                     const liabItemCell = row[liabItemCol];
-                    if (typeof liabItemCell === "string" && liabItemCell.trim().length > 0) {
-                      currentLiabCategory = liabItemCell.trim();
-                    }
+                    if (typeof liabItemCell === "string" && liabItemCell.trim().length > 0) currentLiabCategory = liabItemCell.trim();
                     const liabNameCell = liabNameCol !== undefined ? row[liabNameCol] : undefined;
                     const liabAmountCell = liabAmountCol !== undefined ? row[liabAmountCol] : undefined;
-                    if (
-                      typeof liabAmountCell === "number" &&
-                      ((typeof liabNameCell === "string" && (liabNameCell.includes("주택담보대출") || liabNameCell.includes("주담대"))) || currentLiabCategory.includes("장기대출"))
-                    ) {
-                      mortgageAmount = Math.abs(liabAmountCell);
+                    if (liabAmountCell !== undefined && ((typeof liabNameCell === "string" && (liabNameCell.includes("주택담보대출") || liabNameCell.includes("주담대"))) || currentLiabCategory.includes("장기대출"))) {
+                      mortgageAmount = toNumber(liabAmountCell);
                     }
                   }
                 }
               }
 
-              // "N.투자현황" 상세 표(상품명/투자원금/평가금액/수익률)에서 더 정확한 값을 찾아 덮어쓴다.
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
@@ -1547,22 +1492,21 @@ ${question}`;
                   if (!dRow) continue;
                   const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
                   if (typeof nameVal === "string" && (nameVal.includes("총계") || nameVal.includes("보유상품개수"))) break;
-
                   const principalVal = principalColIdx !== -1 ? dRow[principalColIdx] : undefined;
                   const appraisedVal = appraisedColIdx !== -1 ? dRow[appraisedColIdx] : undefined;
-                  if (typeof nameVal === "string" && nameVal.trim().length > 0 && typeof principalVal === "number" && typeof appraisedVal === "number") {
+                  if (typeof nameVal === "string" && nameVal.trim().length > 0 && principalVal !== undefined && appraisedVal !== undefined) {
+                    const principal = toNumber(principalVal);
+                    const appraised = toNumber(appraisedVal);
+                    if (!appraised) continue;
                     const name = ownerTag + nameVal.trim();
                     const rawYield = yieldColIdx !== -1 ? dRow[yieldColIdx] : undefined;
-                    const yieldRate = typeof rawYield === "number"
-                      ? Math.round(rawYield * 100) / 100
-                      : (principalVal !== 0 ? Math.round(((appraisedVal - principalVal) / principalVal) * 10000) / 100 : 0);
-                    investMap.set(name, { name, principal: Math.round(Math.abs(principalVal)), appraised: Math.round(Math.abs(appraisedVal)), yieldRate });
+                    const yieldRate = typeof rawYield === "number" ? Math.round(rawYield * 100) / 100 : (principal !== 0 ? Math.round(((appraised - principal) / principal) * 10000) / 100 : 0);
+                    investMap.set(name, { name, principal, appraised, yieldRate });
                   }
                 }
                 break;
               }
 
-              // "N.대출현황" 상세 표(상품명/대출잔액/대출금리)에서 주담대 잔액·금리를 더 정확히 반영한다.
               for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 if (!row) continue;
@@ -1573,17 +1517,15 @@ ${question}`;
                 const nameColIdx = row.findIndex(c => String(c || "").trim() === "상품명");
                 const balanceColIdx = row.findIndex(c => String(c || "").trim() === "대출잔액");
                 const rateColIdx = row.findIndex(c => String(c || "").trim() === "대출금리");
-
                 for (let rr = r + 1; rr < rows.length; rr++) {
                   const dRow = rows[rr];
                   if (!dRow) continue;
                   const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
                   if (typeof nameVal === "string" && nameVal.includes("총계")) break;
-
                   if (typeof nameVal === "string" && (nameVal.includes("주택담보대출") || nameVal.includes("주담대"))) {
                     const balanceVal = balanceColIdx !== -1 ? dRow[balanceColIdx] : undefined;
                     const rateVal = rateColIdx !== -1 ? dRow[rateColIdx] : undefined;
-                    if (typeof balanceVal === "number") mortgageAmount = Math.abs(balanceVal);
+                    if (balanceVal !== undefined) mortgageAmount = toNumber(balanceVal);
                     if (typeof rateVal === "number") mortgageRate = rateVal;
                   }
                 }
@@ -1591,11 +1533,9 @@ ${question}`;
               }
 
               if (assetHeaderRowIdx !== -1) {
-                newInvestments.push(...Array.from(investMap.values()));
-
+                const newInvestments = Array.from(investMap.values());
                 mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate);
-
-                assetsSuccessCount += (newFree.length + newInvestments.length);
+                assetsSuccessCount += newFree.length + newInvestments.length;
                 parsedStructured = true;
                 anySheetParsed = true;
               }
@@ -1605,140 +1545,83 @@ ${question}`;
               const rawData = utils.sheet_to_json<any>(ws);
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newInvestments: typeof ASSET_INVESTMENTS = [];
-
               rawData.forEach((row: any) => {
                 const findVal = (keys: string[]) => {
-                  const matchedKey = Object.keys(row).find(k => 
-                    keys.some(candidate => k.toLowerCase().replace(/\s+/g, "").includes(candidate))
-                  );
+                  const matchedKey = Object.keys(row).find(k => keys.some(candidate => k.toLowerCase().replace(/\s+/g, "").includes(candidate)));
                   return matchedKey ? row[matchedKey] : undefined;
                 };
-
                 const rawName = findVal(["자산명", "계좌명", "이름", "name", "asset", "account"]);
                 const rawAmount = findVal(["금액", "잔액", "평가액", "amount", "balance", "value"]);
                 const rawType = findVal(["유형", "구분", "종류", "type", "category"]);
                 const rawOwner = findVal(["소유자", "소유", "명의", "owner"]);
-
                 if (!rawName) return;
-
                 let name = String(rawName).trim();
-                let amount = 0;
-                if (rawAmount !== undefined) {
-                  if (typeof rawAmount === "number") {
-                    amount = Math.round(rawAmount);
-                  } else {
-                    amount = parseInt(String(rawAmount).replace(/[^0-9-]/g, "")) || 0;
-                  }
-                }
-
+                const amount = toNumber(rawAmount);
+                if (!amount) return;
                 const nameLower = name.toLowerCase();
-
-                if (
-                  ["합계", "총계", "총자산", "순자산", "소계", "총 5건", "총5건", "건수"].some(h => nameLower.includes(h)) ||
-                  nameLower.includes("주택담보대출") || 
-                  nameLower.includes("주담대") || 
-                  nameLower.includes("nh주택담보대출") || 
-                  nameLower.includes("대출금") || 
-                  nameLower.includes("대출") || 
-                  nameLower.includes("보험") || 
-                  nameLower.includes("삼성생명") || 
-                  nameLower.includes("삼성화재") || 
-                  nameLower.includes("라이프") ||
-                  nameLower.includes("보장성") || 
-                  nameLower.includes("보험금") || 
-                  nameLower.includes("총계") || 
-                  nameLower.includes("소계") || 
-                  nameLower.includes("합계") || 
-                  nameLower.includes("부채")
-                ) {
-                  return;
-                }
-
+                if (["합계", "총계", "총자산", "순자산", "소계", "건수", "부채", "대출", "보험"].some(h => nameLower.includes(h))) return;
                 let ownerPrefix = ownerTag;
                 if (rawOwner) {
                   const ownerStr = String(rawOwner);
-                  if (ownerStr.includes("영범")) {
-                    ownerPrefix = "[영범] ";
-                  } else if (ownerStr.includes("재은")) {
-                    ownerPrefix = "[재은] ";
-                  }
+                  if (ownerStr.includes("영범")) ownerPrefix = "[영범] ";
+                  else if (ownerStr.includes("재은")) ownerPrefix = "[재은] ";
                 }
-
-                if (ownerPrefix && !name.startsWith("[")) {
-                  name = ownerPrefix + name;
-                }
-
+                if (ownerPrefix && !name.startsWith("[")) name = ownerPrefix + name;
                 const typeStr = rawType ? String(rawType).toLowerCase() : "";
-
-                if (typeStr.includes("입출금") || typeStr.includes("자유") || typeStr.includes("현금") || typeStr.includes("free") || typeStr.includes("cash") || typeStr.includes("적금") || typeStr.includes("예금") || typeStr.includes("저축") || typeStr.includes("savings") || typeStr.includes("전자") || typeStr.includes("페이") || typeStr.includes("간편") || typeStr.includes("pay") || typeStr.includes("electronic")) {
-                  const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
-                  if (isInvestmentName) {
-                    newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
-                  } else {
-                    newFree.push({ name, amount });
-                  }
-                } else if (typeStr.includes("주식") || typeStr.includes("투자") || typeStr.includes("펀드") || typeStr.includes("증권") || typeStr.includes("stock") || typeStr.includes("investment")) {
+                const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
+                if (isInvestmentName || typeStr.includes("주식") || typeStr.includes("투자") || typeStr.includes("펀드") || typeStr.includes("증권") || typeStr.includes("stock") || typeStr.includes("investment")) {
                   const rawYield = findVal(["수익률", "수익", "yield", "rate"]);
                   const yieldRate = rawYield !== undefined ? parseFloat(String(rawYield).replace(/[^0-9.-]/g, "")) || 0 : 0;
                   newInvestments.push({ name, principal: amount, appraised: amount, yieldRate });
                 } else {
-                  const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
-                  if (isInvestmentName) {
-                    newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
-                  } else {
-                    newFree.push({ name, amount });
-                  }
+                  newFree.push({ name, amount });
                 }
               });
-
               if (newFree.length > 0 || newInvestments.length > 0) {
                 mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null);
-                assetsSuccessCount += (newFree.length + newInvestments.length);
+                assetsSuccessCount += newFree.length + newInvestments.length;
                 anySheetParsed = true;
               }
             }
           }
         }
-
-        if (anySheetParsed) {
-          const nextAssetMonths = Object.keys(parsedAssetSnapshots).sort();
-          const defaultAssetMonth = nextAssetMonths[nextAssetMonths.length - 1];
-          const defaultSnapshot = parsedAssetSnapshots[defaultAssetMonth] || emptyAssetSnapshot();
-          const finalInvestments = defaultSnapshot.investmentAssets || [];
-          const finalFreeAssets = defaultSnapshot.freeAssets || [];
-          setAssetSnapshots(parsedAssetSnapshots);
-          setSelectedAssetMonth(defaultAssetMonth);
-          localStorage.setItem("VIVALDI_SELECTED_ASSET_MONTH", defaultAssetMonth);
-          setFreeAssets(finalFreeAssets);
-          setSavingsAssets(defaultSnapshot.savingsAssets || []);
-          setElectronicAssets(defaultSnapshot.electronicAssets || []);
-          setInvestmentAssets(finalInvestments);
-          if (defaultSnapshot.liability?.amount) LIABILITY_MORTGAGE.amount = defaultSnapshot.liability.amount;
-          if (defaultSnapshot.liability?.rate) LIABILITY_MORTGAGE.rate = defaultSnapshot.liability.rate;
-          setAssetCompareMonths(nextAssetMonths.slice(-3));
-          setAssetsFileName(file.name);
-          syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments).then(ok => {
-            if (!ok) {
-              alert("이 브라우저에는 반영됐지만, Supabase 저장에 실패했습니다. 개발자 도구 콘솔을 확인해 주세요.");
-            }
-          });
-          updateHouseholdSettingsInSupabase({
-            assets_file_name: file.name,
-            ...(defaultSnapshot.liability?.amount ? { mortgage_amount: defaultSnapshot.liability.amount } : {}),
-            ...(defaultSnapshot.liability?.rate ? { mortgage_rate: defaultSnapshot.liability.rate } : {})
-          });
-          alert(`자산/부채 현황 ${assetsSuccessCount}개 계좌가 ${nextAssetMonths.length}개 월 snapshot으로 연동되었습니다!`);
-        } else {
-          alert("업로드된 파일에서 유효한 자산/부채 현황 정보를 찾지 못했습니다.");
-        }
-      } catch (error) {
-        console.error(error);
-        alert("자산/부채 현황 파싱 중 오류가 발생했습니다.");
       }
-    };
-    reader.readAsBinaryString(file);
-  };
 
+      if (anySheetParsed) {
+        const nextAssetSnapshots = { ...assetSnapshots, ...parsedAssetSnapshots };
+        const nextAssetMonths = Object.keys(nextAssetSnapshots).sort();
+        const defaultAssetMonth = nextAssetMonths[nextAssetMonths.length - 1];
+        const defaultSnapshot = nextAssetSnapshots[defaultAssetMonth] || emptyAssetSnapshot();
+        const finalInvestments = defaultSnapshot.investmentAssets || [];
+        const finalFreeAssets = defaultSnapshot.freeAssets || [];
+        setAssetSnapshots(nextAssetSnapshots);
+        setSelectedAssetMonth(defaultAssetMonth);
+        localStorage.setItem("VIVALDI_SELECTED_ASSET_MONTH", defaultAssetMonth);
+        setFreeAssets(finalFreeAssets);
+        setSavingsAssets(defaultSnapshot.savingsAssets || []);
+        setElectronicAssets(defaultSnapshot.electronicAssets || []);
+        setInvestmentAssets(finalInvestments);
+        if (defaultSnapshot.liability?.amount) LIABILITY_MORTGAGE.amount = defaultSnapshot.liability.amount;
+        if (defaultSnapshot.liability?.rate) LIABILITY_MORTGAGE.rate = defaultSnapshot.liability.rate;
+        setAssetCompareMonths(nextAssetMonths.slice(-3));
+        setAssetsFileName(files.map(file => file.name).join(", "));
+        syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments);
+        updateHouseholdSettingsInSupabase({
+          assets_file_name: files.map(file => file.name).join(", "),
+          ...(defaultSnapshot.liability?.amount ? { mortgage_amount: defaultSnapshot.liability.amount } : {}),
+          ...(defaultSnapshot.liability?.rate ? { mortgage_rate: defaultSnapshot.liability.rate } : {})
+        });
+        alert(`자산/부채 현황 ${files.length}개 파일에서 ${assetsSuccessCount}개 계좌가 ${Object.keys(parsedAssetSnapshots).length}개 월 snapshot으로 연동되었습니다!`);
+      } else {
+        alert("업로드된 파일에서 유효한 자산/부채 현황 정보를 찾지 못했습니다.");
+      }
+    } catch (error) {
+      console.error(error);
+      alert("자산/부채 현황 파싱 중 오류가 발생했습니다.");
+    } finally {
+      e.currentTarget.value = "";
+    }
+  };
   // Toggle item active state
   const handleToggleItem = (id: number) => {
     setLedger(prev => {
@@ -2073,6 +1956,7 @@ ${question}`;
               <input 
                 type="file" 
                 accept=".xlsx, .xls"
+                multiple
                 onChange={handleAssetsExcelUpload}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 title="자산/부채 엑셀 파일 업로드"
@@ -2151,25 +2035,6 @@ ${question}`;
               로그아웃 ({session.user.email})
             </button>
           )}
-        </div>
-
-        <div className="p-5 border-b border-slate-800 space-y-3 bg-slate-950/30" id="sidebar_supabase_sync_status">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Supabase DB Sync</span>
-          <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/50 space-y-2 text-xs">
-            <div className="flex justify-between gap-3">
-              <span className="text-slate-400">연동 상태</span>
-              <span className={`font-bold ${syncStatus.connected ? "text-emerald-400" : "text-rose-300"}`}>{syncStatus.statusText}</span>
-            </div>
-            <div className="flex justify-between gap-3">
-              <span className="text-slate-400">최종 동기화</span>
-              <span className="font-mono text-slate-200 text-right">{syncStatus.loadedAt}</span>
-            </div>
-            <div className="grid grid-cols-1 gap-1 pt-2 border-t border-slate-700/60">
-              <div className="flex justify-between"><span className="text-slate-400">income_expenses</span><strong>{syncStatus.incomeExpensesCount.toLocaleString()}건</strong></div>
-              <div className="flex justify-between"><span className="text-slate-400">assets_youngbeom</span><strong>{syncStatus.youngbeomCount.toLocaleString()}건</strong></div>
-              <div className="flex justify-between"><span className="text-slate-400">assets_jaeeun</span><strong>{syncStatus.jaeeunCount.toLocaleString()}건</strong></div>
-            </div>
-          </div>
         </div>
 
         {/* Sidebar Profiles & Home Info */}
@@ -2881,7 +2746,7 @@ ${question}`;
                 </div>
               </div>
 
-              {/* 정렬 기준 선택: 날짜순 vs 지출자별 */}
+              {/* 정렬 기준 선택: 날짜순/지출자별/금액순 */}
               <div className="flex items-center gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3" id="ledger_sort_mode_toggle">
                 <span className="text-xs font-bold text-slate-600">정렬 기준:</span>
                 <button
@@ -2901,6 +2766,15 @@ ${question}`;
                   }`}
                 >
                   지출자별
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLedgerSortMode("amount")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    ledgerSortMode === "amount" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                  }`}
+                >
+                  금액순
                 </button>
               </div>
 
