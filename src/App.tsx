@@ -920,6 +920,46 @@ export default function App() {
     }
   }, [ledger, uniqueMonths, selectedMonth]);
 
+  // 지출 내역을 날짜순(있는 그대로) 또는 지출자별로 묶어서 보여준다.
+  const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
+    if (ledgerSortMode === "date") {
+      return [{ label: null, items }];
+    }
+    const groups = new Map<string, LedgerItem[]>();
+    items.forEach(item => {
+      const key = (item.spender || "").trim() || "미지정";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    });
+    return Array.from(groups.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([label, groupItems]) => ({ label, items: groupItems }));
+  };
+
+  const filterLedgerItems = (items: LedgerItem[]) => {
+    const query = ledgerSearchQuery.trim().toLowerCase();
+    return items.filter((item) => {
+      if (ledgerVisibilityFilter === "active" && !item.active) return false;
+      if (ledgerVisibilityFilter === "inactive" && item.active) return false;
+      if (!query) return true;
+      return [item.content, item.category, item.memo || "", item.spender || ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
+  };
+
+  const sortLedgerItems = (items: LedgerItem[]) => {
+    const next = [...items];
+    if (ledgerSortMode === "amount") {
+      return next.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+    }
+    if (ledgerSortMode === "spender") {
+      return next.sort((a, b) => (a.spender || "").localeCompare(b.spender || ""));
+    }
+    return next.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  };
+
   // --- 3. GENERAL METRICS CALCULATION ---
   // Financial aggregates
   const totalFree = freeAssets.reduce((sum, item) => sum + item.amount, 0);
@@ -1850,45 +1890,7 @@ ${question}`;
     deleteLedgerItemFromSupabase(id);
   };
 
-  // 지출 내역을 날짜순(있는 그대로) 또는 지출자별로 묶어서 보여준다.
-  const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
-    if (ledgerSortMode === "date") {
-      return [{ label: null, items }];
-    }
-    const groups = new Map<string, LedgerItem[]>();
-    items.forEach(item => {
-      const key = (item.spender || "").trim() || "미지정";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(item);
-    });
-    return Array.from(groups.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([label, groupItems]) => ({ label, items: groupItems }));
-  };
 
-  const filterLedgerItems = (items: LedgerItem[]) => {
-    const query = ledgerSearchQuery.trim().toLowerCase();
-    return items.filter((item) => {
-      if (ledgerVisibilityFilter === "active" && !item.active) return false;
-      if (ledgerVisibilityFilter === "inactive" && item.active) return false;
-      if (!query) return true;
-      return [item.content, item.category, item.memo || "", item.spender || ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(query);
-    });
-  };
-
-  const sortLedgerItems = (items: LedgerItem[]) => {
-    const next = [...items];
-    if (ledgerSortMode === "amount") {
-      return next.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
-    }
-    if (ledgerSortMode === "spender") {
-      return next.sort((a, b) => (a.spender || "").localeCompare(b.spender || ""));
-    }
-    return next.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  };
 
   // 체크리스트: 추가/토글/수정/삭제 (Supabase에 저장되어 재접속·다른 기기에서도 유지됨)
   const handleAddChecklistItem = (label: string) => {

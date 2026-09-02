@@ -1,0 +1,6 @@
+app.py
+upload_to_supabase.py
+*.xlsx
+tools/requirements.txt
+schema.sql
+supabase/

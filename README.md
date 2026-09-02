@@ -24,7 +24,7 @@ Supabase SQL Editor에서 `schema.sql` 전체를 실행합니다.
 ## 로컬 실행
 
 ```bash
-pip install -r requirements.txt
+pip install -r tools/requirements.txt
 streamlit run app.py
 ```
 
