@@ -40,6 +40,16 @@ import {
   INITIAL_LEDGER 
 } from "./data";
 
+const getAuthErrorMessage = (error: { message?: string } | null) => {
+  const message = error?.message?.trim() ?? "";
+
+  if (/failed to fetch|network|fetch/i.test(message)) {
+    return "인증 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+  }
+
+  return message || "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+};
+
 const emptyAssetSnapshot = (): AssetSnapshot => ({
   freeAssets: [],
   savingsAssets: [],
@@ -329,15 +339,20 @@ export default function App() {
     setForgotSubmitting(true);
     setForgotError("");
     setForgotMessage("");
-    const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim(), {
-      redirectTo: window.location.origin
-    });
-    if (error) {
-      setForgotError(error.message);
-    } else {
-      setForgotMessage("입력하신 이메일로 비밀번호 재설정 링크를 보냈습니다. 메일함(스팸함 포함)을 확인해 주세요.");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim(), {
+        redirectTo: window.location.origin
+      });
+      if (error) {
+        setForgotError(getAuthErrorMessage(error));
+      } else {
+        setForgotMessage("입력하신 이메일로 비밀번호 재설정 링크를 보냈습니다. 메일함(스팸함 포함)을 확인해 주세요.");
+      }
+    } catch (error) {
+      setForgotError(getAuthErrorMessage(error instanceof Error ? error : null));
+    } finally {
+      setForgotSubmitting(false);
     }
-    setForgotSubmitting(false);
   };
 
   const handleResetPassword = async (e: React.FormEvent) => {
