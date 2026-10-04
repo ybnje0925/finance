@@ -576,9 +576,11 @@ export default function App() {
 
   // --- 2. LEDGER MONTH SELECTION & FORM STATES ---
   const uniqueMonths = Array.from(new Set(ledger.map(item => item.month))).sort() as string[];
-  const [selectedMonth, setSelectedMonth] = useState<string>("2026-07");
+  const latestExpenseMonth = ledger.filter(item => item.type === "지출").map(item => item.month).sort().at(-1) || uniqueMonths.at(-1) || "";
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => latestExpenseMonth);
+  const previousLatestMonth = useRef(latestExpenseMonth);
   const [isMultiMonth, setIsMultiMonth] = useState<boolean>(false);
-  const [selectedMonths, setSelectedMonths] = useState<string[]>(["2026-07"]);
+  const [selectedMonths, setSelectedMonths] = useState<string[]>(() => latestExpenseMonth ? [latestExpenseMonth] : []);
   const [ledgerSortMode, setLedgerSortMode] = useState<"date" | "spender" | "amount">("date");
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState<string>("");
   const [ledgerVisibilityFilter, setLedgerVisibilityFilter] = useState<"all" | "active" | "inactive">("all");
@@ -598,7 +600,7 @@ export default function App() {
   // 자산 변동 추이 비교 월 (3번: 자산 탭에서 비교할 월들을 직접 선택)
   const [assetCompareMonths, setAssetCompareMonths] = useState<string[]>([]);
 
-  // 재무적 지출 분석 탭: 카테고리별 상세 지출 드릴다운 선택 상태
+  // 지출 상세내역 탭: 카테고리별 상세 지출 드릴다운 선택 상태
   const [drilldownCategory, setDrilldownCategory] = useState<string>("전체");
 
   // Gemini 데이터 분석 챗봇: Vercel 서버리스 함수의 GEMINI_API_KEY 환경변수로 자동 호출한다.
@@ -883,12 +885,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assetMonths.join("|")]);
 
-  // If the current selected month is not in uniqueMonths (e.g. all deleted), fallback
+  // 자료 로딩 또는 최신 지출 월 변경 시 최신 월로 이동하고, 수동 월 선택은 유지한다.
   useEffect(() => {
-    if (uniqueMonths.length > 0 && !uniqueMonths.includes(selectedMonth)) {
-      setSelectedMonth(uniqueMonths[uniqueMonths.length - 1]);
+    const latestChanged = previousLatestMonth.current !== latestExpenseMonth;
+    previousLatestMonth.current = latestExpenseMonth;
+    if (latestChanged || !uniqueMonths.includes(selectedMonth)) {
+      setSelectedMonth(latestExpenseMonth);
     }
-  }, [ledger, uniqueMonths, selectedMonth]);
+    setSelectedMonths(prev => {
+      const valid = prev.filter(month => uniqueMonths.includes(month));
+      if (latestChanged || valid.length === 0) return latestExpenseMonth ? [latestExpenseMonth] : [];
+      return valid.length === prev.length ? prev : valid;
+    });
+  }, [latestExpenseMonth, uniqueMonths.join("|"), selectedMonth]);
 
   // 지출 내역을 날짜순/금액순은 그대로, 지출자별은 그룹으로 보여준다.
   const groupLedgerItemsForDisplay = (items: LedgerItem[]): { label: string | null; items: LedgerItem[] }[] => {
@@ -1036,26 +1045,6 @@ export default function App() {
     const sortedCategories = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1]);
     const top5 = sortedCategories.slice(0, 5) as [string, number][];
     
-    const insights: string[] = [];
-    insights.push(`**${m}월 총 지출은 ${totalExpense.toLocaleString()}원**입니다.`);
-    
-    const fixedStatus = fixedRatio <= 40 ? "적정 수준(40% 이하)이며" : "다소 높은 편(40% 초과)으로 집중 관리가 필요하며";
-    insights.push(`고정비 비중이 **${fixedRatio.toFixed(1)}% (${fixedSum.toLocaleString()}원)**로 ${fixedStatus}, 변동비 비중은 **${variableRatio.toFixed(1)}% (${variableSum.toLocaleString()}원)**입니다.`);
-    
-    if (foodSum > 0) {
-      insights.push(`특히 **식비 지출(${foodSum.toLocaleString()}원)**이 전체 소비의 **${foodRatio.toFixed(1)}%**를 차지하여 가장 큰 비중을 보입니다.`);
-    }
-    if (insuranceSum > 0) {
-      insights.push(`**보험료/금융 지출(${insuranceSum.toLocaleString()}원)**은 전체 지출의 **${insuranceRatio.toFixed(1)}%**입니다.`);
-    }
-    if (variableRatio > 50) {
-      insights.push("변동비 비중이 높은 편이므로 불필요한 외식이나 불필요한 소액 변동 지출을 조금만 줄여도 추가적인 저축과 예적금 여력을 확보할 수 있습니다.");
-    } else {
-      insights.push("변동비 지출이 훌륭히 잘 관리되고 있으며, 남는 잉여 자금은 즉시 저축 또는 투자 자산으로 배분하는 것이 유리합니다.");
-    }
-    
-    const summaryText = insights.join(" ");
-    
     return {
       totalIncome,
       totalExpense,
@@ -1067,8 +1056,7 @@ export default function App() {
       foodRatio,
       insuranceSum,
       insuranceRatio,
-      top5,
-      summaryText
+      top5
     };
   };
 
@@ -1321,12 +1309,10 @@ ${question}`;
           setLedger(uniqueItems); // Overwrite completely with the freshly uploaded ledger
           setLedgerFileName(file.name);
 
-          if (uniqueItems[0]?.month) {
-            setSelectedMonth(uniqueItems[0].month);
-            if (isMultiMonth && !selectedMonths.includes(uniqueItems[0].month)) {
-              setSelectedMonths(prev => [...prev, uniqueItems[0].month].sort());
-            }
-          }
+          const uploadedMonth = uniqueItems.filter(item => item.type === "지출").map(item => item.month).sort().at(-1)
+            || uniqueItems.map(item => item.month).sort().at(-1) || "";
+          setSelectedMonth(uploadedMonth);
+          setSelectedMonths(uploadedMonth ? [uploadedMonth] : []);
 
           syncLedgerReplaceToSupabase(uniqueItems).then(ok => {
             if (!ok) {
@@ -2114,7 +2100,7 @@ ${question}`;
             id="nav_btn_analysis"
           >
             <PieChart className="w-4 h-4 text-emerald-400" />
-            <span>재무적 지출 분석</span>
+            <span>지출 상세내역</span>
           </button>
 
           <button
@@ -2171,7 +2157,7 @@ ${question}`;
             <h2 className="text-2xl font-bold tracking-tight text-slate-900">
               {activeTab === "overview" && "총괄 대시보드"}
               {activeTab === "ledger" && "지출과 수입 (Interactive Ledger)"}
-              {activeTab === "analysis" && "재무적 지출 분석 (Financial Expense Analysis)"}
+              {activeTab === "analysis" && "지출 상세내역"}
               {activeTab === "assets" && "자산 및 부채 (Asset & Trend Analysis)"}
               {activeTab === "report" && "가계부 및 앱 개선 리포트"}
             </h2>
@@ -2186,60 +2172,6 @@ ${question}`;
              ========================================== */}
           {activeTab === "overview" && (
             <div className="space-y-8" id="overview_tab">
-              
-              {/* [이달의 재무 브리핑] 신규 세션 추가 */}
-              {(() => {
-                const briefing = calculateMonthlyBriefing(selectedMonth);
-                return (
-                  <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6" id="monthly_financial_briefing_card">
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg"><BarChart2 className="w-4 h-4" /></span>
-                        <span>[이달의 재무 브리핑] - {selectedMonth.replace("-", "년 ")}월 지출 분석 및 진단</span>
-                      </h3>
-                      <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                        우리 가계의 실시간 자산 흐름과 당월 지출 구조를 종합 분석한 AI 스마트 요약 리포트입니다.
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div className="bg-rose-50/30 rounded-2xl border border-rose-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-2">{selectedMonth.replace("-", "년 ")}월 총 지출액</span>
-                        <strong className="text-2xl font-mono text-rose-600 font-black">
-                          {briefing.totalExpense.toLocaleString()} 원
-                        </strong>
-                      </div>
-                      <div className="bg-blue-50/30 rounded-2xl border border-blue-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">고정비 비중</span>
-                        <strong className="text-2xl font-mono text-blue-700 font-black">
-                          {briefing.fixedRatio.toFixed(1)}%
-                        </strong>
-                        <span className="text-[11px] text-slate-400 mt-1 font-semibold">
-                          ({briefing.fixedSum.toLocaleString()} 원)
-                        </span>
-                      </div>
-                      <div className="bg-amber-50/30 rounded-2xl border border-amber-100/50 p-5 text-center flex flex-col justify-center items-center">
-                        <span className="text-xs font-bold text-slate-500 mb-1">변동비 비중</span>
-                        <strong className="text-2xl font-mono text-amber-700 font-black">
-                          {briefing.variableRatio.toFixed(1)}%
-                        </strong>
-                        <span className="text-[11px] text-slate-400 mt-1 font-semibold">
-                          ({briefing.variableSum.toLocaleString()} 원)
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="bg-blue-50/40 border-l-4 border-blue-500 p-4 rounded-r-2xl shadow-xs">
-                      <span className="font-bold text-blue-800 text-sm flex items-center gap-1.5">
-                        실시간 재정 분석 리포트 (Financial Insights)
-                      </span>
-                      <p className="text-slate-700 text-xs sm:text-sm leading-relaxed mt-2 font-medium">
-                        {briefing.summaryText.replace(/\*\*/g, "")}
-                      </p>
-                    </div>
-                  </div>
-                );
-              })()}
               
               {/* 월별 지출 현황 및 수입 종합 분석 패널 (1번 사진 대체) */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6" id="monthly_income_expense_summary_dashboard">
@@ -2348,7 +2280,7 @@ ${question}`;
                       </strong>
                     </div>
 
-                    {/* 지출 카테고리 비중 도넛 차트 (4번: 재무적 지출 분석 비중 시각화) */}
+                    {/* 지출 카테고리 비중 도넛 차트 (4번: 지출 상세내역 비중 시각화) */}
                     {getMonthlyExpenses(selectedMonth).length > 0 && (
                       <div className="bg-white/70 rounded-2xl border border-rose-100/50">
                         <SVGMultiPieChart
@@ -2528,57 +2460,6 @@ ${question}`;
                 </div>
               )}
 
-              <div className="grid grid-cols-1 gap-8" id="mortgage_summary_section">
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between space-y-6" id="mortgage_detail_panel">
-                  <div className="space-y-4">
-                    <div className="border-b border-slate-100 pb-4">
-                      <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                        <CreditCard className="w-5 h-5 text-emerald-600" />
-                        <span>NH 주택담보대출 스펙</span>
-                      </h4>
-                      <p className="text-[11px] text-slate-400">농협은행 주택 구입 자금 대출 정보</p>
-                    </div>
-
-                    <div className="space-y-3 text-xs sm:text-sm" id="mortgage_specs">
-                      <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">대출 약정 기관</span>
-                        <span className="font-bold text-slate-900">NH농협은행</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">최초 대출 원금</span>
-                        <span className="font-bold font-mono text-slate-900">600,000,000원</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">약정 연 이자율</span>
-                        <span className="font-bold text-emerald-600 flex items-center">
-                          <Percent className="w-3.5 h-3.5 mr-0.5" />
-                          <span>{LIABILITY_MORTGAGE.rate}%</span>
-                        </span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">대출 신규 일자</span>
-                        <span className="font-semibold text-slate-800">{LIABILITY_MORTGAGE.startDate}</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-slate-100">
-                        <span className="text-slate-500">대출 만기 일자</span>
-                        <span className="font-semibold text-slate-800">{LIABILITY_MORTGAGE.endDate}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quick Monthly Interest Box */}
-                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center space-y-1" id="mortgage_quick_interest">
-                    <span className="text-[10px] text-slate-500 block">매월 고정 약정 이자 예상액</span>
-                    <strong className="text-lg font-mono text-slate-950 font-black">
-                      {Math.round((LIABILITY_MORTGAGE.amount * (LIABILITY_MORTGAGE.rate / 100)) / 12).toLocaleString()}원
-                    </strong>
-                    <p className="text-[9px] text-slate-400">일할 계산 정산 기준에 따라 실제 부과액 변동 가능</p>
-                  </div>
-
-                </div>
-
-              </div>
-
               {/* Gemini AI 데이터 분석 챗봇 */}
               <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4" id="gemini_chatbot_panel">
                 <div>
@@ -2670,7 +2551,7 @@ ${question}`;
                         onClick={() => {
                           setIsMultiMonth(false);
                           if (!selectedMonths.includes(selectedMonth)) {
-                            setSelectedMonth(selectedMonths[0] || "2026-07");
+                            setSelectedMonth(selectedMonths.at(-1) || latestExpenseMonth);
                           }
                         }}
                         className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
@@ -3069,7 +2950,7 @@ ${question}`;
           )}
 
           {/* ==========================================
-              TAB 2.5: 재무적 지출 분석 (Financial Expense Analysis)
+              TAB 2.5: 지출 상세내역
              ========================================== */}
           {activeTab === "analysis" && (
             <div className="space-y-8" id="financial_expense_analysis_tab">
@@ -3172,24 +3053,6 @@ ${question}`;
                         <div className="border-t border-slate-100 pt-4">
                           <SVGMultiPieChart items={briefing.top5} />
                         </div>
-                      </div>
-                    </div>
-
-                    {/* ③ 재무 분석 요약 리포트 */}
-                    <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-4">
-                      <h4 className="font-bold text-slate-900 text-base flex items-center gap-1.5">
-                        <span className="p-1 bg-blue-50 text-blue-600 rounded flex items-center justify-center w-6 h-6"><BarChart2 className="w-4 h-4" /></span>
-                        <span>③ 재무 분석 요약 리포트 (Financial Insights)</span>
-                      </h4>
-                      <p className="text-xs text-slate-400 leading-relaxed">
-                        선택된 월의 자산 배분 결과와 지출 체질에 대하여 AI 지출 진단 엔진이 자동 산출한 정량적 보고서입니다.
-                      </p>
-                      
-                      <div className="bg-blue-50/50 border-l-4 border-blue-500 p-5 rounded-r-2xl shadow-xs">
-                        <span className="font-bold text-blue-800 text-sm block mb-2">당월 정밀 재정 제언</span>
-                        <p className="text-slate-700 text-xs sm:text-sm leading-relaxed font-medium">
-                          {briefing.summaryText.replace(/\*\*/g, "")}
-                        </p>
                       </div>
                     </div>
 

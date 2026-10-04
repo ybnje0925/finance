@@ -455,7 +455,7 @@ TEMPLATE = """
       <div class="tabs">
         <button class="tab-button active" data-tab="overview">🏠 총괄 대시보드</button>
         <button class="tab-button" data-tab="ledger">💸 지출과 수입</button>
-        <button class="tab-button" data-tab="analysis">📊 재무적 지출 분석</button>
+        <button class="tab-button" data-tab="analysis">📊 지출 상세내역</button>
         <button class="tab-button" data-tab="assets">📈 자산 및 부채</button>
         <button class="tab-button" data-tab="report">🧩 가계부 및 앱 개선 리포트</button>
       </div>
