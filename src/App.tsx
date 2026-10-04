@@ -24,6 +24,7 @@ import {
   BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
+import { numberDuplicateAccounts, encodeAssetAccounts, decodeAssetAccounts, normalizeAssetAccounts } from "./assetAccounts";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment, AssetSnapshot } from "./types";
@@ -65,11 +66,10 @@ const cloneAssetSnapshot = (snapshot: AssetSnapshot): AssetSnapshot => ({
   liability: snapshot.liability ? { ...snapshot.liability } : undefined,
 });
 
-const assetSnapshotTotal = (snapshot: AssetSnapshot) =>
-  snapshot.freeAssets.reduce((sum, item) => sum + item.amount, 0) +
-  snapshot.savingsAssets.reduce((sum, item) => sum + item.amount, 0) +
-  snapshot.electronicAssets.reduce((sum, item) => sum + item.amount, 0) +
-  snapshot.investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
+const assetSnapshotTotal = (snapshot: AssetSnapshot) => {
+  const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
+  return [...accounts.free, ...accounts.savings].reduce((sum, item) => sum + item.amount, 0);
+};
 
 const getAssetSheetMonthKey = (sheetName: string, fallbackYear: number) => {
   const monthMatch = sheetName.match(/(1[0-2]|0?[1-9])\s*\uC6D4/);
@@ -433,7 +433,10 @@ export default function App() {
       }
       if (freeRows.length > 0) {
         // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
-        setFreeAssets(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
+        const decoded = decodeAssetAccounts(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
+        const accounts = normalizeAssetAccounts(decoded.free, decoded.savings);
+        setFreeAssets(accounts.free);
+        setSavingsAssets(accounts.savings);
       }
       if (investRows.length > 0) {
         setInvestmentAssets(investRows.map((r: any) => ({
@@ -516,7 +519,7 @@ export default function App() {
     logSupabaseError("가계부 항목 삭제", error);
   };
 
-  const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[]): Promise<boolean> => {
+  const syncAssetsReplaceToSupabase = async (free: { name: string; amount: number }[], investments: InvestmentItem[], savings = savingsAssets): Promise<boolean> => {
     if (!supabase || !session) return true;
     let ok = true;
     const { error: delFreeError } = await supabase.from("asset_free_items").delete().gte("id", 0);
@@ -525,8 +528,9 @@ export default function App() {
     const { error: delInvError } = await supabase.from("asset_investment_items").delete().gte("id", 0);
     logSupabaseError("투자 자산 전체 삭제", delInvError);
     ok = ok && !delInvError;
-    if (free.length > 0) {
-      const { error } = await supabase.from("asset_free_items").insert(free.map(f => ({ name: f.name, amount: f.amount })));
+    const accounts = encodeAssetAccounts(free, savings);
+    if (accounts.length > 0) {
+      const { error } = await supabase.from("asset_free_items").insert(accounts);
       logSupabaseError("자유입출금 자산 저장", error);
       ok = ok && !error;
     }
@@ -676,8 +680,8 @@ export default function App() {
 
   // 세부 계좌 보기 토글 상태
   const [expandedAssets, setExpandedAssets] = useState<Record<string, boolean>>({
-    free: false,
-    savings: false,
+    free: true,
+    savings: true,
     electronic: false,
     investment: false
   });
@@ -783,8 +787,9 @@ export default function App() {
   const applyAssetSnapshotToDisplay = (month: string, snapshots = assetSnapshots) => {
     const snapshot = snapshots[month];
     if (!snapshot) return;
-    setFreeAssets(snapshot.freeAssets || []);
-    setSavingsAssets(snapshot.savingsAssets || []);
+    const accounts = normalizeAssetAccounts(snapshot.freeAssets || [], snapshot.savingsAssets || []);
+    setFreeAssets(accounts.free);
+    setSavingsAssets(accounts.savings);
     setElectronicAssets(snapshot.electronicAssets || []);
     setInvestmentAssets(snapshot.investmentAssets || []);
     if (snapshot.liability?.amount) LIABILITY_MORTGAGE.amount = snapshot.liability.amount;
@@ -802,10 +807,13 @@ export default function App() {
     setAssetSnapshots(prev => {
       const snapshot = prev[selectedAssetMonth];
       if (!snapshot) return prev;
+      const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
       return {
         ...prev,
         [selectedAssetMonth]: {
           ...cloneAssetSnapshot(snapshot),
+          freeAssets: accounts.free,
+          savingsAssets: accounts.savings,
           ...patch,
         }
       };
@@ -838,6 +846,17 @@ export default function App() {
   const ASSET_OWNER_OPTIONS = ["미지정", "영범", "재은", "공동"];
   const parseAssetOwner = (name: string) => name.match(/^\[(.+?)\]\s*/)?.[1] || "미지정";
   const stripAssetOwnerTag = (name: string) => name.replace(/^\[.+?\]\s*/, "");
+
+  const handleSetAccountOwner = (kind: "free" | "savings", index: number, owner: string) => {
+    const accounts = kind === "free" ? freeAssets : savingsAssets;
+    const next = accounts.map((account, i) => i !== index ? account : {
+      ...account, name: (owner === "미지정" ? "" : `[${owner}] `) + stripAssetOwnerTag(account.name),
+    });
+    if (kind === "free") setFreeAssets(next);
+    else setSavingsAssets(next);
+    updateSelectedAssetSnapshot(kind === "free" ? { freeAssets: next } : { savingsAssets: next });
+    syncAssetsReplaceToSupabase(kind === "free" ? next : freeAssets, investmentAssets, kind === "savings" ? next : savingsAssets);
+  };
 
   const handleSetFreeAssetOwner = (index: number, owner: string) => {
     setFreeAssets(prev => {
@@ -947,10 +966,10 @@ export default function App() {
   
   // Custom stock state if users want to simulate, but let's calculate from ASSET_INVESTMENTS
   const totalInvestment = investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
-  const totalAssets = totalFree + totalSavings + totalElectronic + totalInvestment;
+  const totalAssets = totalFree + totalSavings;
   const totalLiabilities = LIABILITY_MORTGAGE.amount;
   const netWorth = totalAssets - totalLiabilities;
-  const cashAndLike = totalFree + totalSavings + totalElectronic;
+  const cashAndLike = totalFree + totalSavings;
   const totalAssetAndLike = cashAndLike + totalInvestment;
   const cashPercent = totalAssetAndLike > 0 ? Math.round((cashAndLike / totalAssetAndLike) * 1000) / 10 : 84.8;
   const investPercent = totalAssetAndLike > 0 ? Math.round((totalInvestment / totalAssetAndLike) * 1000) / 10 : 15.2;
@@ -1334,7 +1353,7 @@ ${question}`;
   };
 
   const handleAssetsExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const files: File[] = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
     const readAssetFile = (file: File) => new Promise<string>((resolve, reject) => {
@@ -1355,18 +1374,10 @@ ${question}`;
         return parsedAssetSnapshots[monthKey];
       };
 
-      const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null) => {
+      const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null, savings: typeof ASSET_SAVINGS = []) => {
         const snapshot = getWritableSnapshot(monthKey);
-        free.forEach(f => {
-          const existingIdx = snapshot.freeAssets.findIndex(existing => existing.name === f.name);
-          if (existingIdx === -1) snapshot.freeAssets.push(f);
-          else snapshot.freeAssets[existingIdx] = f;
-        });
-        investments.forEach(inv => {
-          const existingIdx = snapshot.investmentAssets.findIndex(existing => existing.name === inv.name);
-          if (existingIdx === -1) snapshot.investmentAssets.push(inv);
-          else snapshot.investmentAssets[existingIdx] = inv;
-        });
+        snapshot.freeAssets.push(...free);
+        snapshot.savingsAssets.push(...savings);
         if (mortgageAmount) {
           snapshot.liability = { amount: mortgageAmount, rate: mortgageRate ?? snapshot.liability?.rate ?? null };
         } else if (mortgageRate) {
@@ -1394,16 +1405,15 @@ ${question}`;
 
           const sourceName = `${file.name} ${wsname}`;
           const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
-          const textContent = rows.map(r => r.join(" ")).join("\n").toLowerCase();
           const sheetMonthKey = getAssetMonthKeyFromText(sourceName, fallbackAssetYear) || fileMonthKey || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
           const ownerTag = getOwnerPrefixFromAssetSource(sourceName) || fileOwnerPrefix || (isAssetsSheetName ? "" : `[${wsname}] `);
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
             let parsedStructured = false;
 
-            if (textContent.includes("고객정보") || textContent.includes("재무현황") || textContent.includes("투자현황") || textContent.includes("대출현황")) {
+            if (rows.some(row => row.some(cell => String(cell || "").trim() === "상품명"))) {
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
-              const investMap = new Map<string, InvestmentItem>();
+              const newSavings: typeof ASSET_SAVINGS = [];
               let mortgageAmount: number | null = null;
               let mortgageRate: number | null = null;
               let assetHeaderRowIdx = -1;
@@ -1455,11 +1465,11 @@ ${question}`;
                     if (typeof nameCell === "string" && nameCell.trim().length > 0 && amountCell !== undefined) {
                       const name = ownerTag + nameCell.trim();
                       const amount = toNumber(amountCell);
-                      if (!amount) continue;
-                      if (currentCategory.includes("자유입출금") || currentCategory.includes("현금") || currentCategory.includes("저축성") || currentCategory.includes("전자금융")) {
+                      if (currentCategory.includes("자유입출금")) {
                         newFree.push({ name, amount });
-                      } else if (currentCategory.includes("투자성") || currentCategory.includes("주식")) {
-                        investMap.set(name, { name, principal: amount, appraised: amount, yieldRate: 0 });
+                      } else if (currentCategory.includes("저축성")) {
+                        newSavings.push({ name, amount });
+
                       }
                     }
                   }
@@ -1474,38 +1484,6 @@ ${question}`;
                     }
                   }
                 }
-              }
-
-              for (let r = 0; r < rows.length; r++) {
-                const row = rows[r];
-                if (!row) continue;
-                const hasPrincipalHeader = row.some(c => String(c || "").trim() === "투자원금");
-                const hasAppraisedHeader = row.some(c => String(c || "").trim() === "평가금액");
-                if (!hasPrincipalHeader || !hasAppraisedHeader) continue;
-
-                const nameColIdx = row.findIndex(c => String(c || "").trim() === "상품명");
-                const principalColIdx = row.findIndex(c => String(c || "").trim() === "투자원금");
-                const appraisedColIdx = row.findIndex(c => String(c || "").trim() === "평가금액");
-                const yieldColIdx = row.findIndex(c => String(c || "").trim() === "수익률");
-
-                for (let rr = r + 1; rr < rows.length; rr++) {
-                  const dRow = rows[rr];
-                  if (!dRow) continue;
-                  const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
-                  if (typeof nameVal === "string" && (nameVal.includes("총계") || nameVal.includes("보유상품개수"))) break;
-                  const principalVal = principalColIdx !== -1 ? dRow[principalColIdx] : undefined;
-                  const appraisedVal = appraisedColIdx !== -1 ? dRow[appraisedColIdx] : undefined;
-                  if (typeof nameVal === "string" && nameVal.trim().length > 0 && principalVal !== undefined && appraisedVal !== undefined) {
-                    const principal = toNumber(principalVal);
-                    const appraised = toNumber(appraisedVal);
-                    if (!appraised) continue;
-                    const name = ownerTag + nameVal.trim();
-                    const rawYield = yieldColIdx !== -1 ? dRow[yieldColIdx] : undefined;
-                    const yieldRate = typeof rawYield === "number" ? Math.round(rawYield * 100) / 100 : (principal !== 0 ? Math.round(((appraised - principal) / principal) * 10000) / 100 : 0);
-                    investMap.set(name, { name, principal, appraised, yieldRate });
-                  }
-                }
-                break;
               }
 
               for (let r = 0; r < rows.length; r++) {
@@ -1534,9 +1512,8 @@ ${question}`;
               }
 
               if (assetHeaderRowIdx !== -1) {
-                const newInvestments = Array.from(investMap.values());
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate);
-                assetsSuccessCount += newFree.length + newInvestments.length;
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, [], mortgageAmount, mortgageRate, newSavings);
+                assetsSuccessCount += newFree.length + newSavings.length;
                 parsedStructured = true;
                 anySheetParsed = true;
               }
@@ -1545,15 +1522,15 @@ ${question}`;
             if (!parsedStructured) {
               const rawData = utils.sheet_to_json<any>(ws);
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
-              const newInvestments: typeof ASSET_INVESTMENTS = [];
+              const newSavings: typeof ASSET_SAVINGS = [];
               rawData.forEach((row: any) => {
                 const findVal = (keys: string[]) => {
                   const matchedKey = Object.keys(row).find(k => keys.some(candidate => k.toLowerCase().replace(/\s+/g, "").includes(candidate)));
                   return matchedKey ? row[matchedKey] : undefined;
                 };
-                const rawName = findVal(["자산명", "계좌명", "이름", "name", "asset", "account"]);
+                const rawName = findVal(["상품명", "자산명", "계좌명", "이름", "name", "asset", "account"]);
                 const rawAmount = findVal(["금액", "잔액", "평가액", "amount", "balance", "value"]);
-                const rawType = findVal(["유형", "구분", "종류", "type", "category"]);
+                const rawType = findVal(["항목", "유형", "구분", "종류", "type", "category"]);
                 const rawOwner = findVal(["소유자", "소유", "명의", "owner"]);
                 if (!rawName) return;
                 let name = String(rawName).trim();
@@ -1569,18 +1546,12 @@ ${question}`;
                 }
                 if (ownerPrefix && !name.startsWith("[")) name = ownerPrefix + name;
                 const typeStr = rawType ? String(rawType).toLowerCase() : "";
-                const isInvestmentName = ["주식", "펀드", "cma", "isa", "증권", "위탁", "tiger", "kodex", "s&p", "sp500", "연금저축", "퇴직연금", "irp", "투자", "종합위탁", "중개형"].some(k => nameLower.includes(k));
-                if (isInvestmentName || typeStr.includes("주식") || typeStr.includes("투자") || typeStr.includes("펀드") || typeStr.includes("증권") || typeStr.includes("stock") || typeStr.includes("investment")) {
-                  const rawYield = findVal(["수익률", "수익", "yield", "rate"]);
-                  const yieldRate = rawYield !== undefined ? parseFloat(String(rawYield).replace(/[^0-9.-]/g, "")) || 0 : 0;
-                  newInvestments.push({ name, principal: amount, appraised: amount, yieldRate });
-                } else {
-                  newFree.push({ name, amount });
-                }
+                if (typeStr.includes("자유입출금")) newFree.push({ name, amount });
+                else if (typeStr.includes("저축성")) newSavings.push({ name, amount });
               });
-              if (newFree.length > 0 || newInvestments.length > 0) {
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null);
-                assetsSuccessCount += newFree.length + newInvestments.length;
+              if (newFree.length > 0 || newSavings.length > 0) {
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, [], null, null, newSavings);
+                assetsSuccessCount += newFree.length + newSavings.length;
                 anySheetParsed = true;
               }
             }
@@ -1589,6 +1560,10 @@ ${question}`;
       }
 
       if (anySheetParsed) {
+        Object.values(parsedAssetSnapshots).forEach(snapshot => {
+          snapshot.freeAssets = numberDuplicateAccounts(snapshot.freeAssets);
+          snapshot.savingsAssets = numberDuplicateAccounts(snapshot.savingsAssets);
+        });
         const nextAssetSnapshots = { ...assetSnapshots, ...parsedAssetSnapshots };
         const nextAssetMonths = Object.keys(nextAssetSnapshots).sort();
         const defaultAssetMonth = nextAssetMonths[nextAssetMonths.length - 1];
@@ -1606,7 +1581,7 @@ ${question}`;
         if (defaultSnapshot.liability?.rate) LIABILITY_MORTGAGE.rate = defaultSnapshot.liability.rate;
         setAssetCompareMonths(nextAssetMonths.slice(-3));
         setAssetsFileName(files.map(file => file.name).join(", "));
-        syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments);
+        syncAssetsReplaceToSupabase(finalFreeAssets, finalInvestments, defaultSnapshot.savingsAssets);
         updateHouseholdSettingsInSupabase({
           assets_file_name: files.map(file => file.name).join(", "),
           ...(defaultSnapshot.liability?.amount ? { mortgage_amount: defaultSnapshot.liability.amount } : {}),
@@ -1714,7 +1689,7 @@ ${question}`;
       setAssetCompareMonths([]);
       localStorage.removeItem("VIVALDI_SELECTED_ASSET_MONTH");
       setAssetsFileName(null);
-      syncAssetsReplaceToSupabase([], []);
+      syncAssetsReplaceToSupabase([], [], []);
       updateHouseholdSettingsInSupabase({ assets_file_name: null });
     }
   };
@@ -1737,7 +1712,7 @@ ${question}`;
       LIABILITY_MORTGAGE.amount = 600000000;
       LIABILITY_MORTGAGE.rate = 4.08;
       syncLedgerReplaceToSupabase([]);
-      syncAssetsReplaceToSupabase([], []);
+      syncAssetsReplaceToSupabase([], [], []);
       updateHouseholdSettingsInSupabase({
         ledger_file_name: null,
         assets_file_name: null,
@@ -2392,13 +2367,13 @@ ${question}`;
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between" id="kpi_card_assets">
                   <div className="flex justify-between items-start">
                     <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">가계 총 자산</span>
-                    <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">예적금+투자</span>
+                    <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold">입출금·저축</span>
                   </div>
                   <div className="mt-4">
                     <span className="text-2xl font-black font-mono text-slate-950 tracking-tight">
                       {totalAssets.toLocaleString()}원
                     </span>
-                    <p className="text-[11px] text-slate-400 mt-1">영범 자산 + 재은 자산 합산 (예적금, 주식, 전자금융 총액)</p>
+                    <p className="text-[11px] text-slate-400 mt-1">자유입출금 자산 + 저축성 자산 합계</p>
                   </div>
                 </div>
 
@@ -3267,30 +3242,6 @@ ${question}`;
                 const assetMonthSource = assetMonths.length > 0 ? assetMonths : uniqueMonths;
                 const compareList = assetCompareMonths.length > 0 ? assetCompareMonths : (assetMonthSource.length > 0 ? assetMonthSource.slice(-3) : [anchorMonth]);
                 const points = compareList.map(m => ({ month: m, value: assetSnapshots[m] ? assetSnapshotTotal(assetSnapshots[m]) : estimateAssetsForMonth(m) }));
-                const assetOwnerColumns = ["영범", "재은"] as const;
-                const freeAssetsByOwner = assetOwnerColumns.map(owner => {
-                  const items = freeAssets
-                    .map((acc, idx) => ({ acc, idx }))
-                    .filter(({ acc }) => parseAssetOwner(acc.name) === owner)
-                    .sort((a, b) => b.acc.amount - a.acc.amount);
-                  return { owner, items, total: items.reduce((sum, { acc }) => sum + acc.amount, 0) };
-                });
-                const unassignedFreeAssets = freeAssets
-                  .map((acc, idx) => ({ acc, idx }))
-                  .filter(({ acc }) => !assetOwnerColumns.includes(parseAssetOwner(acc.name) as typeof assetOwnerColumns[number]))
-                  .sort((a, b) => b.acc.amount - a.acc.amount);
-                const investmentAssetsByOwner = assetOwnerColumns.map(owner => {
-                  const items = investmentAssets
-                    .map((acc, idx) => ({ acc, idx }))
-                    .filter(({ acc }) => parseAssetOwner(acc.name) === owner)
-                    .sort((a, b) => b.acc.appraised - a.acc.appraised);
-                  return { owner, items, total: items.reduce((sum, { acc }) => sum + acc.appraised, 0) };
-                });
-                const unassignedInvestmentAssets = investmentAssets
-                  .map((acc, idx) => ({ acc, idx }))
-                  .filter(({ acc }) => !assetOwnerColumns.includes(parseAssetOwner(acc.name) as typeof assetOwnerColumns[number]))
-                  .sort((a, b) => b.acc.appraised - a.acc.appraised);
-
                 const maxVal = Math.max(...points.map(p => p.value), 1);
                 const minVal = Math.min(...points.map(p => p.value), 0);
                 const valRange = maxVal - minVal || 1;
@@ -3309,198 +3260,76 @@ ${question}`;
 
                 return (
                   <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-8 border border-slate-800 shadow-xl space-y-8" id="total_asset_hero_panel">
-                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 border-b border-white/10 pb-6">
+                    <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6 border-b border-white/10 pb-6">
                       <div className="space-y-1">
-                        <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest inline-block">
+                        <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full text-sm font-bold uppercase tracking-widest inline-block">
                           Assets & Wealth Status
                         </span>
                         <h3 className="text-xl sm:text-2xl font-black text-white">
                           우리집 현재 통합 금융 자산 및 변동 추이
                         </h3>
-                        <p className="text-xs text-slate-400">
-                          가계부의 수지 타산과 실시간 연동되어 운용되는 통합 순자산 현황판입니다.
+                        <p className="text-sm text-slate-300">
+                          자유입출금 자산과 저축성 자산의 계좌별 잔액을 합산한 현황입니다.
                         </p>
                       </div>
                       
-                      <div className="text-left md:text-right">
-                        <span className="text-xs text-slate-400 block font-bold uppercase tracking-wider">우리집 실시간 총 금융자산</span>
-                        <strong className="text-3xl sm:text-4xl font-mono text-emerald-400 font-black tracking-tight block mt-1">
+                      <div className="text-left xl:text-right">
+                        <span className="text-sm text-slate-300 block font-bold uppercase tracking-wider">우리집 실시간 총 금융자산</span>
+                        <strong className="text-3xl sm:text-4xl font-mono text-emerald-400 font-black tracking-tight block mt-1 whitespace-nowrap">
                           {totalAssets.toLocaleString()}원
                         </strong>
                       </div>
                     </div>
 
                     {/* Sub-asset grid */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4" id="sub_assets_metrics_grid">
+                    <div className="grid grid-cols-1 xl:grid-cols-2 items-start gap-6" id="sub_assets_metrics_grid">
                       
-                      {/* Card 1: 자유입출금 자산 */}
-                      <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
-                        <div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">자유입출금 자산</span>
-                            <button
-                              onClick={() => toggleAssetExpand("free")}
-                              className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
-                            >
-                              {expandedAssets.free ? "숨기기 ▲" : "세부 보기 ▼"}
+                      {([
+                        { key: "free" as const, label: "자유입출금 자산", accounts: freeAssets, total: totalFree },
+                        { key: "savings" as const, label: "저축성 자산", accounts: savingsAssets, total: totalSavings },
+                      ]).map(({ key, label, accounts, total }) => (
+                        <section key={key} className="rounded-2xl bg-white border border-slate-200 p-5 sm:p-6 text-slate-900 min-w-0">
+                          <div className="flex items-center justify-between gap-3">
+                            <h4 className="text-base sm:text-lg font-bold">{label}</h4>
+                            <button onClick={() => toggleAssetExpand(key)} className="text-sm font-semibold text-blue-700 px-3 py-2 rounded-lg bg-blue-50 hover:bg-blue-100">
+                              {expandedAssets[key] ? "숨기기 ▲" : "세부 보기 ▼"}
                             </button>
                           </div>
-                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalFree.toLocaleString()}원</strong>
-                        </div>
-                        {expandedAssets.free && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              {freeAssetsByOwner.map(({ owner, items, total }) => (
-                                <div key={owner} className="rounded-xl bg-slate-950/25 border border-white/10 p-3 min-w-0">
-                                  <div className="flex items-start justify-between gap-2 border-b border-white/10 pb-2">
-                                    <div>
-                                      <span className="font-sans text-[10px] font-black text-emerald-300">{owner}</span>
-                                      <p className="font-sans text-[9px] text-slate-500 mt-0.5">자유입출금 합계</p>
+                          <strong className="block text-2xl sm:text-3xl font-mono mt-3 mb-5">{total.toLocaleString()}원</strong>
+                          {expandedAssets[key] && (
+                            <div className="space-y-5">
+                              {ASSET_OWNER_OPTIONS.map(owner => {
+                                const items = numberDuplicateAccounts(accounts).map((acc, idx) => ({ acc, idx })).filter(({ acc }) => parseAssetOwner(acc.name) === owner);
+                                if (!items.length) return null;
+                                const ownerTotal = items.reduce((sum, { acc }) => sum + acc.amount, 0);
+                                return (
+                                  <div key={owner} className="rounded-xl border border-slate-200 overflow-hidden">
+                                    <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 px-4 py-3">
+                                      <span className="text-base font-bold">{owner}</span>
+                                      <strong className="text-base font-mono">{ownerTotal.toLocaleString()}원</strong>
                                     </div>
-                                    <strong className="text-right text-white text-[11px] shrink-0">{total.toLocaleString()}원</strong>
-                                  </div>
-                                  <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                                    {items.length === 0 ? (
-                                      <p className="font-sans text-[10px] text-slate-500 py-4 text-center">등록된 자산 없음</p>
-                                    ) : (
-                                      items.map(({ acc, idx }) => (
-                                        <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                          <div className="flex justify-between items-center gap-2">
-                                            <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                            <span className="shrink-0">{acc.amount.toLocaleString()}원</span>
+                                    <div className="divide-y divide-slate-200">
+                                      {items.map(({ acc, idx }) => (
+                                        <div key={idx} className="p-4 space-y-2">
+                                          <div className="flex flex-wrap justify-between items-start gap-x-4 gap-y-2">
+                                            <span className="text-base leading-relaxed break-words min-w-0 flex-1 basis-40">{stripAssetOwnerTag(acc.name)}</span>
+                                            <strong className="text-base sm:text-lg font-mono whitespace-nowrap">{acc.amount.toLocaleString()}원</strong>
                                           </div>
-                                          <select
-                                            value={parseAssetOwner(acc.name)}
-                                            onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
-                                            className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                            title="계좌 명의 지정"
-                                          >
-                                            {ASSET_OWNER_OPTIONS.map(o => (
-                                              <option key={o} value={o} className="text-slate-900">{o}</option>
-                                            ))}
+                                          <select value={parseAssetOwner(acc.name)} onChange={event => handleSetAccountOwner(key, idx, event.target.value)} className="text-sm text-slate-700 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2" aria-label={`${stripAssetOwnerTag(acc.name)} 명의`}>
+                                            {ASSET_OWNER_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
                                           </select>
                                         </div>
-                                      ))
-                                    )}
+                                      ))}
+                                    </div>
                                   </div>
-                                </div>
-                              ))}
+                                );
+                              })}
+                              {accounts.length === 0 && <p className="text-base text-slate-500 py-4">등록된 자산이 없습니다.</p>}
+                              <p className="text-sm text-slate-600 border-t pt-3">상품별 {accounts.length}개 계좌 합계: <strong className="font-mono text-slate-900">{total.toLocaleString()}원</strong></p>
                             </div>
-                            {unassignedFreeAssets.length > 0 && (
-                              <div className="rounded-xl bg-amber-400/10 border border-amber-300/20 p-3">
-                                <p className="font-sans text-[10px] text-amber-200 font-bold">미지정 자산은 명의를 선택하면 영범/재은 칸으로 이동합니다.</p>
-                                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  {unassignedFreeAssets.map(({ acc, idx }) => (
-                                    <div key={acc.name + idx} className="flex items-center justify-between gap-2">
-                                      <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                      <select
-                                        value={parseAssetOwner(acc.name)}
-                                        onChange={(e) => handleSetFreeAssetOwner(idx, e.target.value)}
-                                        className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                        title="계좌 명의 지정"
-                                      >
-                                        {ASSET_OWNER_OPTIONS.map(o => (
-                                          <option key={o} value={o} className="text-slate-900">{o}</option>
-                                        ))}
-                                      </select>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Card 2: 주식 및 투자자산 */}
-                      <div className="bg-white/5 rounded-2xl p-4 border border-white/5 flex flex-col justify-between transition-all hover:bg-white/10">
-                        <div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[10px] text-slate-400 font-bold">주식 및 투자자산</span>
-                            <button
-                              onClick={() => toggleAssetExpand("investment")}
-                              className="text-[10px] bg-white/10 hover:bg-white/20 text-emerald-300 px-2 py-0.5 rounded transition-all cursor-pointer font-bold font-sans"
-                            >
-                              {expandedAssets.investment ? "숨기기 ▲" : "세부 보기 ▼"}
-                            </button>
-                          </div>
-                          <strong className="text-base sm:text-lg font-mono text-white mt-2 block">{totalInvestment.toLocaleString()}원</strong>
-                        </div>
-                        {expandedAssets.investment && (
-                          <div className="mt-3 pt-3 border-t border-white/10 space-y-3 text-[10px] text-slate-300 font-mono">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              {investmentAssetsByOwner.map(({ owner, items, total }) => (
-                                <div key={owner} className="rounded-xl bg-slate-950/25 border border-white/10 p-3 min-w-0">
-                                  <div className="flex items-start justify-between gap-2 border-b border-white/10 pb-2">
-                                    <div>
-                                      <span className="font-sans text-[10px] font-black text-emerald-300">{owner}</span>
-                                      <p className="font-sans text-[9px] text-slate-500 mt-0.5">투자자산 합계</p>
-                                    </div>
-                                    <strong className="text-right text-white text-[11px] shrink-0">{total.toLocaleString()}원</strong>
-                                  </div>
-                                  <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                                    {items.length === 0 ? (
-                                      <p className="font-sans text-[10px] text-slate-500 py-4 text-center">등록된 자산 없음</p>
-                                    ) : (
-                                      items.map(({ acc, idx }) => {
-                                        const isStock = acc.yieldRate !== 0;
-                                        return (
-                                          <div key={acc.name + idx} className="flex flex-col gap-0.5 py-1 border-b border-white/5 last:border-0">
-                                            <div className="flex justify-between items-center gap-2">
-                                              <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                              <div className="text-right shrink-0">
-                                                <span>{acc.appraised.toLocaleString()}원</span>
-                                                {isStock && (
-                                                  <span className={`text-[8px] ml-1 ${acc.yieldRate >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                                    ({acc.yieldRate >= 0 ? "+" : ""}{acc.yieldRate}%)
-                                                  </span>
-                                                )}
-                                              </div>
-                                            </div>
-                                            <select
-                                              value={parseAssetOwner(acc.name)}
-                                              onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
-                                              className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                              title="계좌 명의 지정"
-                                            >
-                                              {ASSET_OWNER_OPTIONS.map(o => (
-                                                <option key={o} value={o} className="text-slate-900">{o}</option>
-                                              ))}
-                                            </select>
-                                          </div>
-                                        );
-                                      })
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                            {unassignedInvestmentAssets.length > 0 && (
-                              <div className="rounded-xl bg-amber-400/10 border border-amber-300/20 p-3">
-                                <p className="font-sans text-[10px] text-amber-200 font-bold">미지정 투자자산은 명의를 선택하면 영범/재은 칸으로 이동합니다.</p>
-                                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  {unassignedInvestmentAssets.map(({ acc, idx }) => (
-                                    <div key={acc.name + idx} className="flex items-center justify-between gap-2">
-                                      <span className="truncate min-w-0" title={stripAssetOwnerTag(acc.name)}>{stripAssetOwnerTag(acc.name)}</span>
-                                      <select
-                                        value={parseAssetOwner(acc.name)}
-                                        onChange={(e) => handleSetInvestmentAssetOwner(idx, e.target.value)}
-                                        className="bg-white/10 border border-white/10 rounded px-1.5 py-0.5 text-[9px] text-emerald-300 w-fit cursor-pointer focus:outline-none"
-                                        title="계좌 명의 지정"
-                                      >
-                                        {ASSET_OWNER_OPTIONS.map(o => (
-                                          <option key={o} value={o} className="text-slate-900">{o}</option>
-                                        ))}
-                                      </select>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
+                          )}
+                        </section>
+                      ))}
                     </div>
 
                     {/* Net Worth Alert Block */}
@@ -3659,154 +3488,6 @@ ${question}`;
               })()}
 
               {/* Asset Charts Section */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8" id="asset_pie_and_stock_bars">
-                
-                {/* 1) Donut Asset Ratio Box */}
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4" id="asset_ratio_donut_box">
-                  <div>
-                    <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>예적금·현금성 vs 투자성 자산 비율</span>
-                    </h4>
-                    <p className="text-xs text-slate-400">우리 가계의 금융 포트폴리오 안전성 현황</p>
-                  </div>
-
-                  {/* Interactive Custom SVG Pie Chart */}
-                  <div className="flex flex-col sm:flex-row items-center justify-around py-4" id="custom_donut_graph_stage">
-                    
-                    {/* SVG Donut */}
-                    <div className="relative w-44 h-44 shrink-0">
-                      <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                        {/* Circle background */}
-                        <circle cx="50" cy="50" r="38" fill="transparent" stroke="#F1F5F9" strokeWidth="16" />
-                        
-                        {/* Circle 1: Cash/Deposit like */}
-                        <circle
-                          cx="50"
-                          cy="50"
-                          r="38"
-                          fill="transparent"
-                          stroke="#10B981"
-                          strokeWidth="16"
-                          strokeDasharray="238.76"
-                          strokeDashoffset={(238.76 * (1 - cashPercent / 100))}
-                        />
-
-                        {/* Circle 2: Stocks/Investments */}
-                        <circle
-                          cx="50"
-                          cy="50"
-                          r="38"
-                          fill="transparent"
-                          stroke="#F97316"
-                          strokeWidth="16"
-                          strokeDasharray="238.76"
-                          strokeDashoffset="238.76" // Align to top
-                          style={{
-                            strokeDashoffset: (238.76 * (1 - investPercent / 100)),
-                            transform: "rotate(" + (360 * cashPercent / 100) + "deg)",
-                            transformOrigin: "50% 50%"
-                          }}
-                        />
-                      </svg>
-
-                      {/* Central label */}
-                      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                        <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Asset Ratio</span>
-                        <strong className="text-base font-black text-slate-900 font-mono">{investPercent}%</strong>
-                        <span className="text-[9px] text-orange-500 font-bold">투자 자산율</span>
-                      </div>
-                    </div>
-
-                    {/* Custom Pie Legend details */}
-                    <div className="space-y-3.5 text-xs sm:text-sm mt-4 sm:mt-0 max-w-xs" id="pie_legend_details">
-                      <div className="flex items-start space-x-2">
-                        <span className="w-3.5 h-3.5 bg-emerald-500 rounded mt-0.5 shrink-0"></span>
-                        <div>
-                          <p className="font-bold text-slate-800">예적금 및 현금성 자산</p>
-                          <span className="font-mono text-slate-500 text-xs block">
-                            {(totalFree + totalSavings + totalElectronic).toLocaleString()}원 ({cashPercent}%)
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-start space-x-2">
-                        <span className="w-3.5 h-3.5 bg-orange-500 rounded mt-0.5 shrink-0"></span>
-                        <div>
-                          <p className="font-bold text-slate-800">투자성 자산 (주식/CMA)</p>
-                          <span className="font-mono text-slate-500 text-xs block">
-                            {totalInvestment.toLocaleString()}원 ({investPercent}%)
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-
-                {/* 2) Stock Evaluation Comparison */}
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4" id="stock_comparison_box">
-                  <div>
-                    <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full"></span>
-                      <span>주요 주식 종목 평가 (투자 원금 대비 수익 현황)</span>
-                    </h4>
-                    <p className="text-xs text-slate-400">등록된 투자 자산 종목별 원금 대비 평가 금액과 수익률입니다.</p>
-                  </div>
-
-                  {/* Compound Stock Bars */}
-                  <div className="space-y-6 py-2" id="stock_bars_display">
-                    {investmentAssets.length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">아직 등록된 투자 자산이 없습니다. 자산 탭에서 엑셀을 업로드해 주세요.</p>
-                    ) : (
-                      investmentAssets.map((item, idx) => {
-                        const maxVal = Math.max(item.principal, item.appraised, 1);
-                        const principalPct = (item.principal / maxVal) * 100;
-                        const appraisedPct = (item.appraised / maxVal) * 100;
-                        const isProfit = item.appraised >= item.principal;
-                        return (
-                          <div className="space-y-2" key={`${item.name}-${idx}`}>
-                            <div className="flex justify-between items-center text-xs">
-                              <strong className="text-slate-800 text-xs sm:text-sm">{item.name}</strong>
-                              <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-md ${isProfit ? "text-emerald-600 bg-emerald-50" : "text-rose-600 bg-rose-50"}`}>
-                                수익률: {item.yieldRate >= 0 ? "+" : ""}{item.yieldRate}%
-                              </span>
-                            </div>
-
-                            {/* Bars overlay */}
-                            <div className="space-y-1">
-                              {/* Principal Bar */}
-                              <div className="relative">
-                                <div className="flex justify-between text-[10px] text-slate-400 mb-0.5 font-bold">
-                                  <span>투자 원금:</span>
-                                  <span className="font-mono">{item.principal.toLocaleString()}원</span>
-                                </div>
-                                <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                                  <div className="bg-slate-400 h-3.5 rounded-lg transition-all duration-500" style={{ width: `${principalPct}%` }}></div>
-                                </div>
-                              </div>
-
-                              {/* Appraised Bar */}
-                              <div className="relative">
-                                <div className="flex justify-between text-[10px] text-slate-500 mb-0.5 font-bold">
-                                  <span>평가 금액:</span>
-                                  <span className={`font-mono font-bold ${isProfit ? "text-emerald-600" : "text-slate-800"}`}>{item.appraised.toLocaleString()}원</span>
-                                </div>
-                                <div className="w-full bg-slate-100 rounded-lg h-3.5">
-                                  <div className={`h-3.5 rounded-lg transition-all duration-500 ${isProfit ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: `${appraisedPct}%` }}></div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-
-              </div>
-
-              {/* 대출 상환 기록 (원리금균등/원금균등 방식 순차 재계산) */}
               <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-6" id="mortgage_payment_history_section">
                 <div className="border-b border-slate-100 pb-4">
                   <h4 className="text-sm sm:text-base font-bold text-slate-900 flex items-center space-x-2">
@@ -3968,11 +3649,11 @@ ${question}`;
                 const topExpenseCategory = Object.entries(
                   activeLedger
                     .filter(item => item.type === "지출")
-                    .reduce((acc, item) => {
+                    .reduce<Record<string, number>>((acc, item) => {
                       acc[item.category] = (acc[item.category] || 0) + item.amount;
                       return acc;
                     }, {} as Record<string, number>)
-                ).sort((a, b) => b[1] - a[1])[0];
+                ).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
                 const diagnosis =
                   expenseRatio >= 80
                     ? "수입 대비 지출 비중이 높습니다. 반복 결제와 고정비를 먼저 낮춰야 현금흐름 개선 효과가 큽니다."
