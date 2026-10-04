@@ -24,7 +24,7 @@ import {
   BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
-import { numberDuplicateAccounts, encodeAssetAccounts, decodeAssetAccounts, normalizeAssetAccounts } from "./assetAccounts";
+import { numberDuplicateAccounts, encodeAssetAccounts, decodeAssetAccounts, normalizeAssetAccounts, restoreAugustDeposit } from "./assetAccounts";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment, AssetSnapshot } from "./types";
@@ -66,9 +66,10 @@ const cloneAssetSnapshot = (snapshot: AssetSnapshot): AssetSnapshot => ({
   liability: snapshot.liability ? { ...snapshot.liability } : undefined,
 });
 
-const assetSnapshotTotal = (snapshot: AssetSnapshot) => {
-  const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
-  return [...accounts.free, ...accounts.savings].reduce((sum, item) => sum + item.amount, 0);
+const assetSnapshotTotal = (snapshot: AssetSnapshot, month: string) => {
+  const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets, month), snapshot.savingsAssets);
+  return [...accounts.free, ...accounts.savings].reduce((sum, item) => sum + item.amount, 0)
+    + snapshot.investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
 };
 
 const getAssetSheetMonthKey = (sheetName: string, fallbackYear: number) => {
@@ -434,7 +435,8 @@ export default function App() {
       if (freeRows.length > 0) {
         // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
         const decoded = decodeAssetAccounts(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
-        const accounts = normalizeAssetAccounts(decoded.free, decoded.savings);
+        const sourceMonth = String(settingsRes.data?.assets_file_name || "").match(/(20\d{2})(0[1-9]|1[0-2])/);
+        const accounts = normalizeAssetAccounts(restoreAugustDeposit(decoded.free, sourceMonth ? `${sourceMonth[1]}-${sourceMonth[2]}` : ""), decoded.savings);
         setFreeAssets(accounts.free);
         setSavingsAssets(accounts.savings);
       }
@@ -683,7 +685,7 @@ export default function App() {
     free: true,
     savings: true,
     electronic: false,
-    investment: false
+    investment: true
   });
 
   const isDummyAsset = (name: string) => {
@@ -787,7 +789,7 @@ export default function App() {
   const applyAssetSnapshotToDisplay = (month: string, snapshots = assetSnapshots) => {
     const snapshot = snapshots[month];
     if (!snapshot) return;
-    const accounts = normalizeAssetAccounts(snapshot.freeAssets || [], snapshot.savingsAssets || []);
+    const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets || [], month), snapshot.savingsAssets || []);
     setFreeAssets(accounts.free);
     setSavingsAssets(accounts.savings);
     setElectronicAssets(snapshot.electronicAssets || []);
@@ -807,7 +809,7 @@ export default function App() {
     setAssetSnapshots(prev => {
       const snapshot = prev[selectedAssetMonth];
       if (!snapshot) return prev;
-      const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
+      const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets, selectedAssetMonth), snapshot.savingsAssets);
       return {
         ...prev,
         [selectedAssetMonth]: {
@@ -966,7 +968,7 @@ export default function App() {
   
   // Custom stock state if users want to simulate, but let's calculate from ASSET_INVESTMENTS
   const totalInvestment = investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
-  const totalAssets = totalFree + totalSavings;
+  const totalAssets = totalFree + totalSavings + totalInvestment;
   const totalLiabilities = LIABILITY_MORTGAGE.amount;
   const netWorth = totalAssets - totalLiabilities;
   const cashAndLike = totalFree + totalSavings;
@@ -1378,6 +1380,7 @@ ${question}`;
         const snapshot = getWritableSnapshot(monthKey);
         snapshot.freeAssets.push(...free);
         snapshot.savingsAssets.push(...savings);
+        snapshot.investmentAssets.push(...investments);
         if (mortgageAmount) {
           snapshot.liability = { amount: mortgageAmount, rate: mortgageRate ?? snapshot.liability?.rate ?? null };
         } else if (mortgageRate) {
@@ -1414,6 +1417,7 @@ ${question}`;
             if (rows.some(row => row.some(cell => String(cell || "").trim() === "상품명"))) {
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newSavings: typeof ASSET_SAVINGS = [];
+              const newInvestments: InvestmentItem[] = [];
               let mortgageAmount: number | null = null;
               let mortgageRate: number | null = null;
               let assetHeaderRowIdx = -1;
@@ -1469,7 +1473,8 @@ ${question}`;
                         newFree.push({ name, amount });
                       } else if (currentCategory.includes("저축성")) {
                         newSavings.push({ name, amount });
-
+                      } else if (currentCategory.includes("투자성") || currentCategory.includes("주식")) {
+                        newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
                       }
                     }
                   }
@@ -1484,6 +1489,40 @@ ${question}`;
                     }
                   }
                 }
+              }
+
+              for (let r = 0; r < rows.length; r++) {
+                const row = rows[r];
+                if (!row) continue;
+                const hasPrincipalHeader = row.some(c => String(c || "").trim() === "투자원금");
+                const hasAppraisedHeader = row.some(c => String(c || "").trim() === "평가금액");
+                if (!hasPrincipalHeader || !hasAppraisedHeader) continue;
+
+                const nameColIdx = row.findIndex(c => String(c || "").trim() === "상품명");
+                const principalColIdx = row.findIndex(c => String(c || "").trim() === "투자원금");
+                const appraisedColIdx = row.findIndex(c => String(c || "").trim() === "평가금액");
+                const yieldColIdx = row.findIndex(c => String(c || "").trim() === "수익률");
+
+                const detailedInvestments: InvestmentItem[] = [];
+                for (let rr = r + 1; rr < rows.length; rr++) {
+                  const dRow = rows[rr];
+                  if (!dRow) continue;
+                  const nameVal = nameColIdx !== -1 ? dRow[nameColIdx] : undefined;
+                  if (typeof nameVal === "string" && (nameVal.includes("총계") || nameVal.includes("보유상품개수"))) break;
+                  const principalVal = principalColIdx !== -1 ? dRow[principalColIdx] : undefined;
+                  const appraisedVal = appraisedColIdx !== -1 ? dRow[appraisedColIdx] : undefined;
+                  if (typeof nameVal === "string" && nameVal.trim().length > 0 && principalVal !== undefined && appraisedVal !== undefined) {
+                    const principal = toNumber(principalVal);
+                    const appraised = toNumber(appraisedVal);
+                    if (!appraised) continue;
+                    const name = ownerTag + nameVal.trim();
+                    const rawYield = yieldColIdx !== -1 ? dRow[yieldColIdx] : undefined;
+                    const yieldRate = typeof rawYield === "number" ? Math.round(rawYield * 100) / 100 : (principal !== 0 ? Math.round(((appraised - principal) / principal) * 10000) / 100 : 0);
+                    detailedInvestments.push({ name, principal, appraised, yieldRate });
+                  }
+                }
+                if (detailedInvestments.length > 0) newInvestments.splice(0, newInvestments.length, ...detailedInvestments);
+                break;
               }
 
               for (let r = 0; r < rows.length; r++) {
@@ -1512,8 +1551,8 @@ ${question}`;
               }
 
               if (assetHeaderRowIdx !== -1) {
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, [], mortgageAmount, mortgageRate, newSavings);
-                assetsSuccessCount += newFree.length + newSavings.length;
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate, newSavings);
+                assetsSuccessCount += newFree.length + newSavings.length + newInvestments.length;
                 parsedStructured = true;
                 anySheetParsed = true;
               }
@@ -1523,6 +1562,7 @@ ${question}`;
               const rawData = utils.sheet_to_json<any>(ws);
               const newFree: typeof ASSET_FREE_DEPOSITS = [];
               const newSavings: typeof ASSET_SAVINGS = [];
+              const newInvestments: InvestmentItem[] = [];
               rawData.forEach((row: any) => {
                 const findVal = (keys: string[]) => {
                   const matchedKey = Object.keys(row).find(k => keys.some(candidate => k.toLowerCase().replace(/\s+/g, "").includes(candidate)));
@@ -1548,10 +1588,11 @@ ${question}`;
                 const typeStr = rawType ? String(rawType).toLowerCase() : "";
                 if (typeStr.includes("자유입출금")) newFree.push({ name, amount });
                 else if (typeStr.includes("저축성")) newSavings.push({ name, amount });
+                else if (/투자|주식|펀드|증권|investment|stock/.test(typeStr)) newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
               });
-              if (newFree.length > 0 || newSavings.length > 0) {
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, [], null, null, newSavings);
-                assetsSuccessCount += newFree.length + newSavings.length;
+              if (newFree.length > 0 || newSavings.length > 0 || newInvestments.length > 0) {
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null, newSavings);
+                assetsSuccessCount += newFree.length + newSavings.length + newInvestments.length;
                 anySheetParsed = true;
               }
             }
@@ -2373,7 +2414,7 @@ ${question}`;
                     <span className="text-2xl font-black font-mono text-slate-950 tracking-tight">
                       {totalAssets.toLocaleString()}원
                     </span>
-                    <p className="text-[11px] text-slate-400 mt-1">자유입출금 자산 + 저축성 자산 합계</p>
+                    <p className="text-[11px] text-slate-400 mt-1">입출금·저축 + 투자 자산 합계</p>
                   </div>
                 </div>
 
@@ -3241,7 +3282,7 @@ ${question}`;
 
                 const assetMonthSource = assetMonths.length > 0 ? assetMonths : uniqueMonths;
                 const compareList = assetCompareMonths.length > 0 ? assetCompareMonths : (assetMonthSource.length > 0 ? assetMonthSource.slice(-3) : [anchorMonth]);
-                const points = compareList.map(m => ({ month: m, value: assetSnapshots[m] ? assetSnapshotTotal(assetSnapshots[m]) : estimateAssetsForMonth(m) }));
+                const points = compareList.map(m => ({ month: m, value: assetSnapshots[m] ? assetSnapshotTotal(assetSnapshots[m], m) : estimateAssetsForMonth(m) }));
                 const maxVal = Math.max(...points.map(p => p.value), 1);
                 const minVal = Math.min(...points.map(p => p.value), 0);
                 const valRange = maxVal - minVal || 1;
@@ -3269,7 +3310,7 @@ ${question}`;
                           우리집 현재 통합 금융 자산 및 변동 추이
                         </h3>
                         <p className="text-sm text-slate-300">
-                          자유입출금 자산과 저축성 자산의 계좌별 잔액을 합산한 현황입니다.
+                          입출금·저축과 투자 자산을 명의별로 정리한 현황입니다.
                         </p>
                       </div>
                       
@@ -3282,11 +3323,14 @@ ${question}`;
                     </div>
 
                     {/* Sub-asset grid */}
-                    <div className="grid grid-cols-1 xl:grid-cols-2 items-start gap-6" id="sub_assets_metrics_grid">
+                    <div className="space-y-6" id="sub_assets_metrics_grid">
                       
                       {([
-                        { key: "free" as const, label: "자유입출금 자산", accounts: freeAssets, total: totalFree },
-                        { key: "savings" as const, label: "저축성 자산", accounts: savingsAssets, total: totalSavings },
+                        { key: "free" as const, label: "자유입출금·저축성 자산", accounts: [
+                          ...freeAssets.map((acc, sourceIndex) => ({ ...acc, kind: "free" as const, sourceIndex })),
+                          ...savingsAssets.map((acc, sourceIndex) => ({ ...acc, kind: "savings" as const, sourceIndex })),
+                        ], total: totalFree + totalSavings },
+                        { key: "investment" as const, label: "투자 자산", accounts: investmentAssets.map((acc, sourceIndex) => ({ ...acc, amount: acc.appraised, kind: "investment" as const, sourceIndex })), total: totalInvestment },
                       ]).map(({ key, label, accounts, total }) => (
                         <section key={key} className="rounded-2xl bg-white border border-slate-200 p-5 sm:p-6 text-slate-900 min-w-0">
                           <div className="flex items-center justify-between gap-3">
@@ -3297,10 +3341,14 @@ ${question}`;
                           </div>
                           <strong className="block text-2xl sm:text-3xl font-mono mt-3 mb-5">{total.toLocaleString()}원</strong>
                           {expandedAssets[key] && (
-                            <div className="space-y-5">
-                              {ASSET_OWNER_OPTIONS.map(owner => {
-                                const items = numberDuplicateAccounts(accounts).map((acc, idx) => ({ acc, idx })).filter(({ acc }) => parseAssetOwner(acc.name) === owner);
-                                if (!items.length) return null;
+                            <div className="grid grid-cols-1 lg:grid-cols-2 items-start gap-5">
+                              {["영범", "재은", "공동", "미지정"].map(owner => {
+                                const displayNames = numberDuplicateAccounts(accounts);
+                                const items = accounts
+                                  .map((acc, idx) => ({ acc: { ...acc, name: displayNames[idx].name }, idx }))
+                                  .filter(({ acc }) => parseAssetOwner(acc.name) === owner)
+                                  .sort((a, b) => b.acc.amount - a.acc.amount);
+                                if (!items.length && owner !== "영범" && owner !== "재은") return null;
                                 const ownerTotal = items.reduce((sum, { acc }) => sum + acc.amount, 0);
                                 return (
                                   <div key={owner} className="rounded-xl border border-slate-200 overflow-hidden">
@@ -3310,12 +3358,13 @@ ${question}`;
                                     </div>
                                     <div className="divide-y divide-slate-200">
                                       {items.map(({ acc, idx }) => (
-                                        <div key={idx} className="p-4 space-y-2">
+                                        <div key={idx} className={`p-4 space-y-2 ${acc.kind === "savings" ? "bg-blue-50/60" : ""}`} >
+                                          {acc.kind === "savings" && <span className="text-xs font-bold text-blue-800">저축성 자산</span>}
                                           <div className="flex flex-wrap justify-between items-start gap-x-4 gap-y-2">
                                             <span className="text-base leading-relaxed break-words min-w-0 flex-1 basis-40">{stripAssetOwnerTag(acc.name)}</span>
                                             <strong className="text-base sm:text-lg font-mono whitespace-nowrap">{acc.amount.toLocaleString()}원</strong>
                                           </div>
-                                          <select value={parseAssetOwner(acc.name)} onChange={event => handleSetAccountOwner(key, idx, event.target.value)} className="text-sm text-slate-700 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2" aria-label={`${stripAssetOwnerTag(acc.name)} 명의`}>
+                                          <select value={parseAssetOwner(acc.name)} onChange={event => acc.kind === "investment" ? handleSetInvestmentAssetOwner(acc.sourceIndex, event.target.value) : handleSetAccountOwner(acc.kind, acc.sourceIndex, event.target.value)} className="text-sm text-slate-700 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2" aria-label={`${stripAssetOwnerTag(acc.name)} 명의`}>
                                             {ASSET_OWNER_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
                                           </select>
                                         </div>

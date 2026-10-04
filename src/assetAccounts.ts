@@ -33,3 +33,17 @@ export const normalizeAssetAccounts = (free: AssetAccount[], savings: AssetAccou
     savings: [...savings, ...free.filter(account => !isExcluded(account.name) && isSavings(account.name))],
   };
 };
+
+// One-time repair of the overwritten August account, verified against the user's Excel screenshot.
+// Match the month and source balances so another month or a newly imported account is never changed.
+export const restoreAugustDeposit = (accounts: AssetAccount[], month: string): AssetAccount[] => {
+  if (month !== "2026-08") return accounts;
+  const matches = (name: string, amount: number) => accounts.some(account => account.name === `[영범] ${name}` && account.amount === amount);
+  if (!matches("입출금통장", 7000) || !matches("NH주거래우대통장", 9255322)
+    || !matches("KB Wise통장-저축예금", 3397018)
+    || accounts.some(account => account.name.startsWith("[영범] 입출금통장") && account.amount === 6256443)) return accounts;
+  const index = accounts.findIndex(account => account.name === "[영범] 입출금통장" && account.amount === 7000);
+  return numberDuplicateAccounts([
+    ...accounts.slice(0, index), { name: "[영범] 입출금통장", amount: 6256443 }, ...accounts.slice(index),
+  ]);
+};
