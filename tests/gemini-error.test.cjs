@@ -1,0 +1,15 @@
+const fs = require('node:fs'), ts = require('typescript'), assert = require('node:assert/strict');
+const exportsObject = {};
+const code = ts.transpileModule(fs.readFileSync('api/gemini-chat.ts', 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS}}).outputText;
+new Function('require', 'exports', code)(() => ({GoogleGenAI: class {}}), exportsObject);
+const classify = exportsObject.classifyGeminiError;
+assert.equal(classify({status: 400, message: 'API key not valid'}).code, 'API_KEY_INVALID');
+assert.equal(classify({message: JSON.stringify({error:{code:400,status:'INVALID_ARGUMENT',message:'Unsupported request'}})}).code, 'INVALID_REQUEST');
+assert.equal(classify({status:404}).code, 'MODEL_UNAVAILABLE');
+assert.equal(classify({status:403}).code, 'ACCESS_DENIED');
+assert.equal(classify({status:429}).code, 'QUOTA_EXCEEDED');
+assert.equal(classify({status:503}).code, 'UPSTREAM_UNAVAILABLE');
+assert.equal(classify({name:'AbortError'}).code, 'UPSTREAM_TIMEOUT');
+assert.equal(classify({message:'fetch failed'}).code, 'UPSTREAM_CONNECTION_FAILED');
+assert(!classify({status:400,message:'private prompt or key'}).message.includes('private'));
+console.log('PASS: SDK 오류 및 JSON 오류 분류, 인증/모델/할당량/시간초과 구분, 원문 비노출');

@@ -1144,7 +1144,10 @@ ${question}`;
         signal: AbortSignal.timeout(55000)
       });
       const data = await res.json().catch(() => { throw new Error("AI 서버 응답을 읽지 못했습니다. API 서버 연결을 확인해 주세요."); });
-      if (!res.ok) throw new Error(data?.error || "서버 요청 실패");
+      if (!res.ok) {
+        const diagnostic = data?.code ? ` (오류 코드: ${data.code}${data.upstreamStatus ? `, HTTP ${data.upstreamStatus}` : ""})` : ` (HTTP ${res.status})`;
+        throw new Error((data?.error || "서버 요청 실패") + diagnostic);
+      }
       setChatMessages(prev => [...prev, { role: "assistant", text: data.text || "답변을 생성하지 못했습니다." }]);
     } catch (error: any) {
       console.error(error);
