@@ -3311,7 +3311,8 @@ ${question}`;
                 return (
                   <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-8 border border-slate-800 shadow-xl space-y-8" id="total_asset_hero_panel">
                     <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6 border-b border-white/10 pb-6">
-                      <div className="space-y-1">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6 min-w-0">
+                        <div className="space-y-1">
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full text-sm font-bold uppercase tracking-widest inline-block">
                           Assets & Wealth Status
                         </span>
@@ -3321,6 +3322,21 @@ ${question}`;
                         <p className="text-sm text-slate-300">
                           입출금·저축과 투자 자산을 명의별로 정리한 현황입니다.
                         </p>
+                      </div>
+                        {assetMonths.length > 0 && (
+                          <select
+                            value={selectedAssetMonth || latestAssetMonth}
+                            onChange={(e) => handleSelectAssetMonth(e.target.value)}
+                            className="w-full sm:w-auto bg-slate-950/70 border border-emerald-400/30 text-emerald-200 rounded-xl px-3 py-2 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-emerald-400/40 cursor-pointer"
+                            title="조회 월 선택"
+                            aria-label="조회 월 선택"
+                            id="asset_month_select"
+                          >
+                            {[...assetMonths].reverse().map(m => (
+                              <option key={m} value={m} className="bg-slate-950 text-emerald-100">{formatMonthLabel(m)}</option>
+                            ))}
+                          </select>
+                        )}
                       </div>
                       
                       <div className="text-left xl:text-right">
@@ -3417,18 +3433,7 @@ ${question}`;
                             업로드된 월별 자산 snapshot을 각각 독립적으로 비교합니다.
                           </p>
                         </div>
-                        {assetMonths.length > 0 && (
-                          <select
-                            value={selectedAssetMonth || latestAssetMonth}
-                            onChange={(e) => handleSelectAssetMonth(e.target.value)}
-                            className="w-full sm:w-auto bg-slate-950/70 border border-emerald-400/30 text-emerald-200 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-emerald-400/40 cursor-pointer"
-                            title="조회 월 선택"
-                          >
-                            {[...assetMonths].reverse().map(m => (
-                              <option key={m} value={m} className="bg-slate-950 text-emerald-100">{formatMonthLabel(m)}</option>
-                            ))}
-                          </select>
-                        )}
+
                       </div>
 
                       {assetMonthSource.length === 0 ? (
