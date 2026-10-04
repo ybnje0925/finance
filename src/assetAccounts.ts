@@ -34,16 +34,15 @@ export const normalizeAssetAccounts = (free: AssetAccount[], savings: AssetAccou
   };
 };
 
-// One-time repair of the overwritten August account, verified against the user's Excel screenshot.
-// Match the month and source balances so another month or a newly imported account is never changed.
-export const restoreAugustDeposit = (accounts: AssetAccount[], month: string): AssetAccount[] => {
-  if (month !== "2026-08") return accounts;
-  const matches = (name: string, amount: number) => accounts.some(account => account.name === `[영범] ${name}` && account.amount === amount);
-  if (!matches("입출금통장", 7000) || !matches("NH주거래우대통장", 9255322)
-    || !matches("KB Wise통장-저축예금", 3397018)
-    || accounts.some(account => account.name.startsWith("[영범] 입출금통장") && account.amount === 6256443)) return accounts;
-  const index = accounts.findIndex(account => account.name === "[영범] 입출금통장" && account.amount === 7000);
-  return numberDuplicateAccounts([
-    ...accounts.slice(0, index), { name: "[영범] 입출금통장", amount: 6256443 }, ...accounts.slice(index),
-  ]);
+// A workbook can contain several monthly sheets. The sheet date takes priority over its filename.
+export const getAssetSourceMonth = (sheetName: string, fileName: string, fallbackYear: number): string | null => {
+  const parse = (text: string, year: number) => {
+    const named = text.match(/(?<!\d)(1[0-2]|0?[1-9])\s*월/);
+    const explicitYear = text.match(/(20\d{2})/);
+    if (named) return `${explicitYear ? explicitYear[1] : year}-${String(Number(named[1])).padStart(2, "0")}`;
+    const compact = text.match(/(20\d{2})[-_.\s]?(0[1-9]|1[0-2])/);
+    return compact ? `${compact[1]}-${compact[2]}` : null;
+  };
+  const fileMonth = parse(fileName, fallbackYear);
+  return parse(sheetName, fileMonth ? Number(fileMonth.slice(0, 4)) : fallbackYear) || fileMonth;
 };

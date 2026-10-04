@@ -24,7 +24,7 @@ import {
   BarChart2
 } from "lucide-react";
 import { read, utils } from "xlsx";
-import { numberDuplicateAccounts, encodeAssetAccounts, decodeAssetAccounts, normalizeAssetAccounts, restoreAugustDeposit } from "./assetAccounts";
+import { numberDuplicateAccounts, encodeAssetAccounts, decodeAssetAccounts, normalizeAssetAccounts, getAssetSourceMonth } from "./assetAccounts";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { LedgerItem, InvestmentItem, ChecklistItem, MortgagePayment, AssetSnapshot } from "./types";
@@ -67,7 +67,7 @@ const cloneAssetSnapshot = (snapshot: AssetSnapshot): AssetSnapshot => ({
 });
 
 const assetSnapshotTotal = (snapshot: AssetSnapshot, month: string) => {
-  const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets, month), snapshot.savingsAssets);
+  const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
   return [...accounts.free, ...accounts.savings].reduce((sum, item) => sum + item.amount, 0)
     + snapshot.investmentAssets.reduce((sum, item) => sum + item.appraised, 0);
 };
@@ -435,8 +435,7 @@ export default function App() {
       if (freeRows.length > 0) {
         // 원 단위는 소수점이 없어야 하므로(재업로드 전 저장된 예전 데이터에 소수점이 남아있을 수 있어) 반올림한다.
         const decoded = decodeAssetAccounts(freeRows.map((r: any) => ({ name: r.name, amount: Math.round(Number(r.amount)) })));
-        const sourceMonth = String(settingsRes.data?.assets_file_name || "").match(/(20\d{2})(0[1-9]|1[0-2])/);
-        const accounts = normalizeAssetAccounts(restoreAugustDeposit(decoded.free, sourceMonth ? `${sourceMonth[1]}-${sourceMonth[2]}` : ""), decoded.savings);
+        const accounts = normalizeAssetAccounts(decoded.free, decoded.savings);
         setFreeAssets(accounts.free);
         setSavingsAssets(accounts.savings);
       }
@@ -789,7 +788,7 @@ export default function App() {
   const applyAssetSnapshotToDisplay = (month: string, snapshots = assetSnapshots) => {
     const snapshot = snapshots[month];
     if (!snapshot) return;
-    const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets || [], month), snapshot.savingsAssets || []);
+    const accounts = normalizeAssetAccounts(snapshot.freeAssets || [], snapshot.savingsAssets || []);
     setFreeAssets(accounts.free);
     setSavingsAssets(accounts.savings);
     setElectronicAssets(snapshot.electronicAssets || []);
@@ -809,7 +808,7 @@ export default function App() {
     setAssetSnapshots(prev => {
       const snapshot = prev[selectedAssetMonth];
       if (!snapshot) return prev;
-      const accounts = normalizeAssetAccounts(restoreAugustDeposit(snapshot.freeAssets, selectedAssetMonth), snapshot.savingsAssets);
+      const accounts = normalizeAssetAccounts(snapshot.freeAssets, snapshot.savingsAssets);
       return {
         ...prev,
         [selectedAssetMonth]: {
@@ -1368,16 +1367,26 @@ ${question}`;
     try {
       const fallbackAssetYear = Number((uniqueMonths[uniqueMonths.length - 1] || selectedMonth || String(new Date().getFullYear())).slice(0, 4)) || new Date().getFullYear();
       const parsedAssetSnapshots: Record<string, AssetSnapshot> = {};
+      const importedSources = new Set<string>();
       let assetsSuccessCount = 0;
       let anySheetParsed = false;
 
       const getWritableSnapshot = (monthKey: string) => {
-        if (!parsedAssetSnapshots[monthKey]) parsedAssetSnapshots[monthKey] = emptyAssetSnapshot();
+        if (!parsedAssetSnapshots[monthKey]) parsedAssetSnapshots[monthKey] = assetSnapshots[monthKey] ? cloneAssetSnapshot(assetSnapshots[monthKey]) : emptyAssetSnapshot();
         return parsedAssetSnapshots[monthKey];
       };
 
-      const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null, savings: typeof ASSET_SAVINGS = []) => {
+      const mergeParsedAssetsIntoSnapshot = (monthKey: string, free: typeof ASSET_FREE_DEPOSITS, investments: typeof ASSET_INVESTMENTS, mortgageAmount: number | null, mortgageRate: number | null, savings: typeof ASSET_SAVINGS = [], ownerTag = "", sourceLabel = "") => {
+        const sourceKey = `${monthKey}|${ownerTag}`;
+        if (importedSources.has(sourceKey)) {
+          throw new Error(`${monthKey} ${ownerTag || "명의 미지정"} 자료가 중복됩니다 (${sourceLabel}). 각 시트에 정확한 월과 명의를 표시해 주세요.`);
+        }
+        importedSources.add(sourceKey);
         const snapshot = getWritableSnapshot(monthKey);
+        const belongsToSource = (name: string) => ownerTag ? name.startsWith(ownerTag) : !/^\[.+?\]/.test(name);
+        snapshot.freeAssets = snapshot.freeAssets.filter(account => !belongsToSource(account.name));
+        snapshot.savingsAssets = snapshot.savingsAssets.filter(account => !belongsToSource(account.name));
+        snapshot.investmentAssets = snapshot.investmentAssets.filter(account => !belongsToSource(account.name));
         snapshot.freeAssets.push(...free);
         snapshot.savingsAssets.push(...savings);
         snapshot.investmentAssets.push(...investments);
@@ -1408,7 +1417,7 @@ ${question}`;
 
           const sourceName = `${file.name} ${wsname}`;
           const isAssetsSheetName = genericAssetSheetKeywords.some(k => wsname.toLowerCase().includes(k.toLowerCase()));
-          const sheetMonthKey = getAssetMonthKeyFromText(sourceName, fallbackAssetYear) || fileMonthKey || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+          const sheetMonthKey = getAssetSourceMonth(wsname, file.name, fallbackAssetYear) || fileMonthKey || selectedAssetMonth || latestAssetMonth || `${fallbackAssetYear}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
           const ownerTag = getOwnerPrefixFromAssetSource(sourceName) || fileOwnerPrefix || (isAssetsSheetName ? "" : `[${wsname}] `);
 
           if (isAssetsSheetName || rows.some(row => row && row.some(val => typeof val === "string" && ["고객정보", "재무현황", "자산", "부채"].some(k => val.includes(k))))) {
@@ -1551,7 +1560,7 @@ ${question}`;
               }
 
               if (assetHeaderRowIdx !== -1) {
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate, newSavings);
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, mortgageAmount, mortgageRate, newSavings, ownerTag, sourceName);
                 assetsSuccessCount += newFree.length + newSavings.length + newInvestments.length;
                 parsedStructured = true;
                 anySheetParsed = true;
@@ -1591,7 +1600,7 @@ ${question}`;
                 else if (/투자|주식|펀드|증권|investment|stock/.test(typeStr)) newInvestments.push({ name, principal: amount, appraised: amount, yieldRate: 0 });
               });
               if (newFree.length > 0 || newSavings.length > 0 || newInvestments.length > 0) {
-                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null, newSavings);
+                mergeParsedAssetsIntoSnapshot(sheetMonthKey, newFree, newInvestments, null, null, newSavings, ownerTag, sourceName);
                 assetsSuccessCount += newFree.length + newSavings.length + newInvestments.length;
                 anySheetParsed = true;
               }
@@ -1634,7 +1643,7 @@ ${question}`;
       }
     } catch (error) {
       console.error(error);
-      alert("자산/부채 현황 파싱 중 오류가 발생했습니다.");
+      alert(error instanceof Error ? error.message : "자산/부채 현황 파싱 중 오류가 발생했습니다.");
     } finally {
       e.currentTarget.value = "";
     }
